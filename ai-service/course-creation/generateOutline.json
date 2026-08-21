@@ -1,0 +1,1230 @@
+{
+  "contract": {
+    "name": "generateCourseOutline",
+    "domain": "ai-service",
+    "module": "course-creation",
+    "version": "v1",
+    "status": "DRAFT",
+    "description": "Generates a full Module -> Chapter -> Lesson -> Topic -> SubTopic curriculum outline with learning outcomes, from course metadata plus previously ingested course materials. Long-running, so it is modelled as an async job: submit returns a jobId, the consumer polls for the result.",
+    "consumer": "college-lms-backend",
+    "provider": "ai-service",
+    "designRefs": [
+      {
+        "screen": "1a",
+        "title": "Course setup - metadata + materials",
+        "usedFor": "Source of course.* request fields and the documentIds that materials resolve to."
+      },
+      {
+        "screen": "1b",
+        "title": "Build mode selection",
+        "usedFor": "Entry point. 'Generate content with AI' submits this job. Copy promises 'Outline in ~30s' and 'Learning outcomes included'."
+      },
+      {
+        "screen": "1c",
+        "title": "AI outline review",
+        "usedFor": "Renders the entire response: tree, learning outcome bullets, Outline summary panel, Sources used panel."
+      }
+    ],
+    "notes": [
+      "The result.module[] subtree is deliberately shaped to be a near drop-in payload for the existing college-lms-backend CreateLessonPlanDto (src/api/course/dto/lessonPlan.dto.ts). Same singular key names (module, chapter, lesson, topic, subTopic) and same field names, so the backend can persist via POST /course/lesson-plan without a translation layer. Only logicalId, orderIndex, learningOutcomes, sourceRefs and contentStatus are additions.",
+      "This contract produces STRUCTURE + LEARNING OUTCOMES only. SubTopic content (explanation, examples, figures) is generated separately - see screen 1d and the bulk content-generation contract.",
+      "This contract does NOT produce assignments. The graded/ungraded assignment rows in 1c render as 'Not built yet' placeholders and are built via screens 1m -> 1j/1i."
+    ]
+  },
+
+  "conventions": {
+    "baseUrl": "{AI_SERVICE_BASE_URL}",
+    "versioning": "Path prefix. Breaking changes ship under a new /api/v{n}/ prefix; v1 and v2 may run side by side during migration.",
+    "successEnvelope": {
+      "status": "success",
+      "statusCode": "<http status>",
+      "data": "<operation payload>",
+      "timestamp": "<ISO-8601 UTC>"
+    },
+    "errorEnvelope": {
+      "status": "failed",
+      "statusCode": "<http status>",
+      "error": "ApplicationError",
+      "errorCode": "<machine-readable code>",
+      "message": "<human-readable, safe to surface in UI>",
+      "details": "<object|null, error-specific context>",
+      "timestamp": "<ISO-8601 UTC>"
+    },
+    "envelopeSource": "Mirrors college-lms-backend src/common/filters/global-exception.filter.ts, with errorCode added so the consumer can branch without string-matching messages.",
+    "dateFormat": "ISO-8601 with milliseconds, UTC (e.g. 2026-08-18T10:30:00.000Z)",
+    "idFormat": "uuid v4"
+  },
+
+  "commonHeaders": {
+    "request": {
+      "Content-Type": {
+        "required": true,
+        "value": "application/json",
+        "appliesTo": ["submit", "cancel"],
+        "description": "Omitted on GET."
+      },
+      "x-api-key": {
+        "required": true,
+        "type": "string",
+        "description": "Shared server-to-server secret. The LMS backend holds it; it is never exposed to the browser. Mirrors the existing ApiKeyGuard convention in college-lms-backend (src/common/guards/api.guard.ts).",
+        "example": "ak_live_9f2c1b0e5a7d4e3f"
+      },
+      "x-tenant-id": {
+        "required": true,
+        "type": "string",
+        "format": "uuid",
+        "description": "Tenant the course belongs to. Enforces multi-tenant isolation on documentIds and jobIds, and scopes usage quotas. A jobId or documentId belonging to another tenant must resolve as 404, never 403, so ids cannot be probed."
+      },
+      "x-request-id": {
+        "required": true,
+        "type": "string",
+        "format": "uuid",
+        "description": "Correlation id echoed into AI service logs so a request can be traced across LMS and AI logs."
+      },
+      "Idempotency-Key": {
+        "required": true,
+        "type": "string",
+        "format": "uuid",
+        "appliesTo": ["submit"],
+        "description": "Guards against duplicate generation on backend retry. A repeat submit with the same key within the retention window returns the EXISTING job (202 with the original jobId) instead of starting a second, billable generation. The key is scoped to the tenant.",
+        "retentionHours": 24
+      }
+    },
+    "response": {
+      "x-request-id": {
+        "description": "Echo of the inbound correlation id."
+      },
+      "Retry-After": {
+        "description": "Seconds to wait. Present on 429 and on 503.",
+        "appliesTo": ["429", "503"]
+      }
+    }
+  },
+
+  "operations": {
+    "submit": {
+      "summary": "Queue an outline generation job.",
+      "method": "POST",
+      "path": "/api/v1/course-creation/outline/generate",
+      "headers": [
+        "Content-Type",
+        "x-api-key",
+        "x-tenant-id",
+        "x-request-id",
+        "Idempotency-Key"
+      ],
+      "timeoutMs": 10000,
+      "requestBody": {
+        "type": "object",
+        "required": ["courseId", "courseVersionId", "course", "documentIds"],
+        "properties": {
+          "courseId": {
+            "type": "string",
+            "format": "uuid",
+            "required": true,
+            "description": "Course.id in the LMS. Echoed back for correlation; the AI service does not resolve it."
+          },
+
+          "courseVersionId": {
+            "type": "string",
+            "format": "uuid",
+            "required": true,
+            "description": "CourseVersion.id the outline will be persisted against. Echoed back in the result so the backend can pass it straight to POST /course/lesson-plan."
+          },
+
+          "course": {
+            "type": "object",
+            "required": true,
+            "description": "Course metadata captured on screen 1a. This is the primary steering signal alongside the documents.",
+            "properties": {
+              "title": {
+                "type": "string",
+                "required": true,
+                "minLength": 3,
+                "maxLength": 200,
+                "example": "Data Structures & Algorithms"
+              },
+              "courseCode": {
+                "type": "string",
+                "required": false,
+                "maxLength": 32,
+                "example": "CS301"
+              },
+              "description": {
+                "type": "string",
+                "required": false,
+                "maxLength": 2000,
+                "description": "Free-text course description from 1a. Strong signal for scope boundaries.",
+                "example": "Core data structures and algorithm design: arrays, linked lists, trees, graphs, sorting and complexity analysis with weekly labs."
+              },
+              "type": {
+                "type": "string",
+                "required": true,
+                "enum": ["CLASSROOM", "SELF_PACED"],
+                "description": "Mirrors the CourseType Prisma enum. CLASSROOM outlines may assume instructor-led pacing and cohort activities; SELF_PACED outlines should be self-contained and finer-grained.",
+                "example": "CLASSROOM"
+              },
+              "versionName": {
+                "type": "string",
+                "required": false,
+                "maxLength": 64,
+                "example": "v1"
+              },
+              "designation": {
+                "type": "object",
+                "required": false,
+                "description": "The programme/cohort this course belongs to. Sets the academic level and audience when academic.difficultyLevel is not supplied.",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "format": "uuid",
+                    "required": true
+                  },
+                  "title": {
+                    "type": "string",
+                    "required": true,
+                    "example": "B.Tech CSE - Semester 3"
+                  }
+                }
+              }
+            }
+          },
+
+          "documentIds": {
+            "type": "array",
+            "required": true,
+            "items": { "type": "string", "format": "uuid" },
+            "minItems": 1,
+            "maxItems": 20,
+            "description": "Ids of course materials already uploaded and parsed by the document ingest API. Every id must be in status PROCESSED - see error DOCUMENT_NOT_PROCESSED. This is why 1b can say '3 files processed' before generation starts.",
+            "dependsOn": "ingestDocument contract (not yet designed - see contract.dependencies)"
+          },
+
+          "generation": {
+            "type": "object",
+            "required": false,
+            "description": "Optional steering. Every field has a service-side default, so screen 1b - which exposes no controls today - can omit this object entirely. Defined now so adding an 'advanced options' panel later is not a breaking change.",
+            "properties": {
+              "structure": {
+                "type": "object",
+                "required": false,
+                "description": "Soft size targets. Expressed as ranges, never exact counts, so the AI can follow the material rather than pad or truncate to hit a number.",
+                "properties": {
+                  "targetModuleCount": {
+                    "type": "range",
+                    "required": false,
+                    "default": { "min": 3, "max": 8 }
+                  },
+                  "chaptersPerModule": {
+                    "type": "range",
+                    "required": false,
+                    "default": { "min": 2, "max": 5 }
+                  },
+                  "lessonsPerChapter": {
+                    "type": "range",
+                    "required": false,
+                    "default": { "min": 2, "max": 5 }
+                  },
+                  "topicsPerLesson": {
+                    "type": "range",
+                    "required": false,
+                    "default": { "min": 1, "max": 4 }
+                  },
+                  "subTopicsPerTopic": {
+                    "type": "range",
+                    "required": false,
+                    "default": { "min": 2, "max": 5 }
+                  },
+                  "maxDepth": {
+                    "type": "string",
+                    "required": false,
+                    "enum": [
+                      "MODULE",
+                      "CHAPTER",
+                      "LESSON",
+                      "TOPIC",
+                      "SUBTOPIC"
+                    ],
+                    "default": "SUBTOPIC",
+                    "description": "Deepest level to generate. Levels below maxDepth are returned as empty arrays, never omitted."
+                  }
+                },
+                "rangeType": {
+                  "type": "object",
+                  "properties": {
+                    "min": { "type": "integer", "minimum": 1 },
+                    "max": { "type": "integer", "minimum": 1 }
+                  },
+                  "constraint": "max >= min"
+                }
+              },
+
+              "academic": {
+                "type": "object",
+                "required": false,
+                "description": "Shapes outcome phrasing and depth more than structure.",
+                "properties": {
+                  "durationWeeks": {
+                    "type": "integer",
+                    "required": false,
+                    "minimum": 1,
+                    "maximum": 52,
+                    "description": "Term length. Used to pace module count and to align with a syllabus week ordering.",
+                    "example": 14
+                  },
+                  "difficultyLevel": {
+                    "type": "string",
+                    "required": false,
+                    "enum": ["BEGINNER", "INTERMEDIATE", "ADVANCED"],
+                    "default": "derived from course.designation.title",
+                    "example": "INTERMEDIATE"
+                  },
+                  "bloomsLevels": {
+                    "type": "array",
+                    "required": false,
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "REMEMBER",
+                        "UNDERSTAND",
+                        "APPLY",
+                        "ANALYZE",
+                        "EVALUATE",
+                        "CREATE"
+                      ]
+                    },
+                    "default": ["UNDERSTAND", "APPLY", "ANALYZE"],
+                    "description": "Bloom's taxonomy verbs the learning outcomes should be written against.",
+                    "example": ["UNDERSTAND", "APPLY", "ANALYZE"]
+                  },
+                  "prerequisiteKnowledge": {
+                    "type": "string",
+                    "required": false,
+                    "maxLength": 1000,
+                    "description": "What learners are assumed to already know, so the outline does not re-teach it.",
+                    "example": "Programming fundamentals in C or Java"
+                  }
+                }
+              },
+
+              "outcomes": {
+                "type": "object",
+                "required": false,
+                "description": "Controls the LEARNING OUTCOMES bullets shown on expand in 1c.",
+                "properties": {
+                  "enabled": {
+                    "type": "boolean",
+                    "required": false,
+                    "default": true
+                  },
+                  "levels": {
+                    "type": "array",
+                    "required": false,
+                    "items": {
+                      "type": "string",
+                      "enum": ["MODULE", "CHAPTER", "LESSON"]
+                    },
+                    "default": ["MODULE", "CHAPTER", "LESSON"],
+                    "description": "Which levels carry outcomes. Matches 1c exactly - topics and subtopics never show outcome bullets, so TOPIC and SUBTOPIC are not valid values."
+                  },
+                  "perNode": {
+                    "type": "range",
+                    "required": false,
+                    "default": { "min": 2, "max": 4 }
+                  }
+                }
+              },
+
+              "locale": {
+                "type": "object",
+                "required": false,
+                "properties": {
+                  "language": {
+                    "type": "string",
+                    "required": false,
+                    "format": "BCP-47",
+                    "default": "en-IN",
+                    "description": "Output language for all generated titles, descriptions and outcomes.",
+                    "example": "en-IN"
+                  },
+                  "academicStandard": {
+                    "type": "string",
+                    "required": false,
+                    "maxLength": 64,
+                    "description": "Board / university / regulator convention to follow in terminology and structure.",
+                    "example": "AICTE"
+                  }
+                }
+              },
+
+              "sourceFidelity": {
+                "type": "object",
+                "required": false,
+                "description": "How closely the outline must track the uploaded materials.",
+                "properties": {
+                  "followSourceOrder": {
+                    "type": "boolean",
+                    "required": false,
+                    "default": true,
+                    "description": "Preserve the sequence found in the source material (typically syllabus week order) rather than reordering pedagogically. Backs the 1c footer copy: 'Outline follows your syllabus week order.'"
+                  },
+                  "strictSourceGrounding": {
+                    "type": "boolean",
+                    "required": false,
+                    "default": false,
+                    "description": "true = every node must be traceable to the uploaded material; gaps are left as gaps. false = the AI may add standard topics the materials omit. When true, sourceRefs is populated on every node and INSUFFICIENT_SOURCE_MATERIAL becomes much more likely."
+                  }
+                }
+              }
+            }
+          },
+
+          "regenerate": {
+            "type": "object",
+            "required": false,
+            "default": null,
+            "description": "Present only when re-running against an existing outline - the 'Regenerate outline' button and the per-row generate actions in 1c. Absent or null means a fresh generation.",
+            "properties": {
+              "previousOutlineId": {
+                "type": "string",
+                "format": "uuid",
+                "required": true,
+                "description": "outlineId of the result being regenerated."
+              },
+              "preserveEditedNodes": {
+                "type": "boolean",
+                "required": false,
+                "default": true,
+                "description": "Backs the 1c copy 'Regenerating keeps your manual edits.' When true, nodes listed in lockedLogicalIds are echoed back verbatim - same logicalId, same title, same outcomes - and the AI regenerates only around them."
+              },
+              "lockedLogicalIds": {
+                "type": "array",
+                "required": false,
+                "items": { "type": "string", "format": "uuid" },
+                "default": [],
+                "description": "logicalIds the teacher hand-edited. The consumer computes this set; the AI service does not track edit history."
+              },
+              "scope": {
+                "type": "object",
+                "required": false,
+                "default": null,
+                "description": "Limits regeneration to one subtree - this is what the per-row generate action targets. null regenerates the whole outline. When scoped, result.module[] still returns the COMPLETE tree, with untouched nodes echoed back unchanged, so the consumer always persists one consistent document.",
+                "properties": {
+                  "level": {
+                    "type": "string",
+                    "required": true,
+                    "enum": ["MODULE", "CHAPTER", "LESSON", "TOPIC"]
+                  },
+                  "logicalId": {
+                    "type": "string",
+                    "format": "uuid",
+                    "required": true
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+
+      "requestExample": {
+        "courseId": "3f7c2a10-9b41-4c8e-a2d5-6e1f0b3c7d84",
+        "courseVersionId": "8c1e5d92-47b3-4a6f-9e02-1d5a8f4b6c37",
+        "course": {
+          "title": "Data Structures & Algorithms",
+          "courseCode": "CS301",
+          "description": "Core data structures and algorithm design: arrays, linked lists, trees, graphs, sorting and complexity analysis with weekly labs.",
+          "type": "CLASSROOM",
+          "versionName": "v1",
+          "designation": {
+            "id": "b7a3f012-5c84-4e91-8d26-3f0a9b1c7e45",
+            "title": "B.Tech CSE - Semester 3"
+          }
+        },
+        "documentIds": [
+          "d1a4b830-2e75-4f19-b6c3-8a2d5e9f0147",
+          "e2b5c941-3f86-4a2b-c7d4-9b3e6f0a1258",
+          "f3c6da52-4097-4b3c-d8e5-0c4f7a1b2369"
+        ],
+        "generation": {
+          "academic": {
+            "durationWeeks": 14,
+            "difficultyLevel": "INTERMEDIATE",
+            "bloomsLevels": ["UNDERSTAND", "APPLY", "ANALYZE"],
+            "prerequisiteKnowledge": "Programming fundamentals in C or Java"
+          },
+          "sourceFidelity": {
+            "followSourceOrder": true,
+            "strictSourceGrounding": false
+          }
+        },
+        "regenerate": null
+      },
+
+      "responses": {
+        "202": {
+          "description": "Job queued. Also returned for a repeat submit carrying a known Idempotency-Key, in which case jobId is the original job.",
+          "body": {
+            "status": "success",
+            "statusCode": 202,
+            "data": {
+              "jobId": {
+                "type": "string",
+                "format": "uuid",
+                "description": "Poll this via the jobStatus operation."
+              },
+              "status": {
+                "type": "string",
+                "enum": ["QUEUED"],
+                "description": "Always QUEUED on submit."
+              },
+              "estimatedSeconds": {
+                "type": "integer",
+                "description": "Best-effort estimate of total generation time. Drives the wait affordance between 1b and 1c."
+              },
+              "pollUrl": {
+                "type": "string",
+                "description": "Absolute path of the jobStatus operation for this job."
+              },
+              "pollAfterMs": {
+                "type": "integer",
+                "description": "How long the consumer should wait before its first poll. Server-controlled so the AI service can shed load without a client change."
+              },
+              "expiresAt": {
+                "type": "string",
+                "format": "date-time",
+                "description": "After this instant the job is abandoned and transitions to FAILED with GENERATION_TIMEOUT."
+              },
+              "createdAt": { "type": "string", "format": "date-time" }
+            },
+            "timestamp": "<ISO-8601>"
+          },
+          "example": {
+            "status": "success",
+            "statusCode": 202,
+            "data": {
+              "jobId": "a91f3c7d-6b28-4e50-9a13-7c4f8b2e0d65",
+              "status": "QUEUED",
+              "estimatedSeconds": 30,
+              "pollUrl": "/api/v1/course-creation/outline/jobs/a91f3c7d-6b28-4e50-9a13-7c4f8b2e0d65",
+              "pollAfterMs": 3000,
+              "expiresAt": "2026-08-18T10:35:00.000Z",
+              "createdAt": "2026-08-18T10:30:00.000Z"
+            },
+            "timestamp": "2026-08-18T10:30:00.000Z"
+          }
+        },
+        "400": { "errorCodes": ["INVALID_REQUEST"] },
+        "401": { "errorCodes": ["INVALID_API_KEY"] },
+        "404": { "errorCodes": ["DOCUMENT_NOT_FOUND"] },
+        "422": {
+          "errorCodes": [
+            "DOCUMENT_NOT_PROCESSED",
+            "INSUFFICIENT_SOURCE_MATERIAL"
+          ]
+        },
+        "429": { "errorCodes": ["RATE_LIMITED", "QUOTA_EXCEEDED"] },
+        "503": { "errorCodes": ["SERVICE_UNAVAILABLE"] }
+      }
+    },
+
+    "jobStatus": {
+      "summary": "Poll a generation job. Returns the outline once the job succeeds.",
+      "method": "GET",
+      "path": "/api/v1/course-creation/outline/jobs/{jobId}",
+      "pathParams": {
+        "jobId": { "type": "string", "format": "uuid", "required": true }
+      },
+      "headers": ["x-api-key", "x-tenant-id", "x-request-id"],
+      "timeoutMs": 15000,
+      "pollingGuidance": "Honour data.pollAfterMs from each response rather than a fixed interval. Suggested consumer backoff: 3s for the first 30s, then 5s, giving up at expiresAt. Terminal states (SUCCEEDED, FAILED, CANCELLED) are retained for 1 hour after completion, then return 404 JOB_NOT_FOUND.",
+      "responses": {
+        "200": {
+          "description": "Current job state. HTTP is 200 for every non-terminal and terminal state, including FAILED - transport succeeded, the job did not. Inspect data.status.",
+          "body": {
+            "status": "success",
+            "statusCode": 200,
+            "data": {
+              "jobId": { "type": "string", "format": "uuid" },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "QUEUED",
+                  "RUNNING",
+                  "SUCCEEDED",
+                  "FAILED",
+                  "CANCELLED"
+                ]
+              },
+              "progress": {
+                "type": "object",
+                "nullable": true,
+                "description": "null while QUEUED.",
+                "properties": {
+                  "percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "stage": {
+                    "type": "string",
+                    "enum": [
+                      "PARSING_SOURCES",
+                      "DRAFTING_STRUCTURE",
+                      "EXPANDING_LESSONS",
+                      "WRITING_OUTCOMES",
+                      "VALIDATING"
+                    ]
+                  },
+                  "message": {
+                    "type": "string",
+                    "description": "Human-readable, safe to surface in UI."
+                  }
+                }
+              },
+              "pollAfterMs": {
+                "type": "integer",
+                "nullable": true,
+                "description": "null once terminal."
+              },
+              "startedAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "completedAt": {
+                "type": "string",
+                "format": "date-time",
+                "nullable": true
+              },
+              "result": {
+                "type": "object",
+                "nullable": true,
+                "description": "Populated only when status is SUCCEEDED. See schemas.outlineResult.",
+                "$ref": "#/schemas/outlineResult"
+              },
+              "error": {
+                "type": "object",
+                "nullable": true,
+                "description": "Populated only when status is FAILED. Same shape as the error envelope body minus status/statusCode, so the consumer has one error-handling path.",
+                "properties": {
+                  "errorCode": { "type": "string" },
+                  "message": { "type": "string" },
+                  "details": { "type": "object", "nullable": true }
+                }
+              }
+            },
+            "timestamp": "<ISO-8601>"
+          },
+          "examples": {
+            "running": {
+              "status": "success",
+              "statusCode": 200,
+              "data": {
+                "jobId": "a91f3c7d-6b28-4e50-9a13-7c4f8b2e0d65",
+                "status": "RUNNING",
+                "progress": {
+                  "percent": 45,
+                  "stage": "DRAFTING_STRUCTURE",
+                  "message": "Drafting modules and chapters"
+                },
+                "pollAfterMs": 3000,
+                "startedAt": "2026-08-18T10:30:02.000Z",
+                "completedAt": null,
+                "result": null,
+                "error": null
+              },
+              "timestamp": "2026-08-18T10:30:15.000Z"
+            },
+            "failed": {
+              "status": "success",
+              "statusCode": 200,
+              "data": {
+                "jobId": "a91f3c7d-6b28-4e50-9a13-7c4f8b2e0d65",
+                "status": "FAILED",
+                "progress": {
+                  "percent": 60,
+                  "stage": "EXPANDING_LESSONS",
+                  "message": "Generation failed"
+                },
+                "pollAfterMs": null,
+                "startedAt": "2026-08-18T10:30:02.000Z",
+                "completedAt": "2026-08-18T10:30:41.000Z",
+                "result": null,
+                "error": {
+                  "errorCode": "MODEL_ERROR",
+                  "message": "The outline could not be generated. Please try again.",
+                  "details": { "retryable": true }
+                }
+              },
+              "timestamp": "2026-08-18T10:30:41.000Z"
+            },
+            "succeeded": { "$ref": "#/schemas/outlineResultExample/value" }
+          }
+        },
+        "401": { "errorCodes": ["INVALID_API_KEY"] },
+        "404": { "errorCodes": ["JOB_NOT_FOUND"] }
+      }
+    },
+
+    "cancel": {
+      "summary": "Cancel a queued or running job.",
+      "method": "POST",
+      "path": "/api/v1/course-creation/outline/jobs/{jobId}/cancel",
+      "pathParams": {
+        "jobId": { "type": "string", "format": "uuid", "required": true }
+      },
+      "headers": ["Content-Type", "x-api-key", "x-tenant-id", "x-request-id"],
+      "requestBody": null,
+      "rationale": "1b -> 1c is a ~30s wait the teacher can back out of. Cancelling stops billable generation instead of orphaning the job.",
+      "responses": {
+        "200": {
+          "body": {
+            "status": "success",
+            "statusCode": 200,
+            "data": {
+              "jobId": { "type": "string", "format": "uuid" },
+              "status": { "type": "string", "enum": ["CANCELLED"] },
+              "cancelledAt": { "type": "string", "format": "date-time" }
+            },
+            "timestamp": "<ISO-8601>"
+          }
+        },
+        "401": { "errorCodes": ["INVALID_API_KEY"] },
+        "404": { "errorCodes": ["JOB_NOT_FOUND"] },
+        "409": { "errorCodes": ["JOB_ALREADY_TERMINAL"] }
+      }
+    }
+  },
+
+  "schemas": {
+    "outlineResult": {
+      "description": "Payload of data.result when a job reaches SUCCEEDED. The module[] subtree maps 1:1 onto CreateLessonPlanDto.",
+      "type": "object",
+      "properties": {
+        "outlineId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Identifies this generated outline. Pass as regenerate.previousOutlineId to regenerate from it."
+        },
+        "courseVersionId": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Echo of the request field, so the result is a complete persist payload on its own."
+        },
+        "generatedAt": { "type": "string", "format": "date-time" },
+        "model": {
+          "type": "object",
+          "description": "Provenance, for auditing and reproducibility.",
+          "properties": {
+            "provider": { "type": "string", "example": "anthropic" },
+            "name": { "type": "string", "example": "claude-opus-5" }
+          }
+        },
+
+        "summary": {
+          "type": "object",
+          "description": "Powers the 'Outline summary' panel in 1c and the step-indicator subtitle ('3 modules - 28 subtopics'). Counts are computed over the tree in this same response and must agree with it exactly.",
+          "properties": {
+            "moduleCount": { "type": "integer" },
+            "chapterCount": { "type": "integer" },
+            "lessonCount": { "type": "integer" },
+            "topicCount": { "type": "integer" },
+            "subTopicCount": { "type": "integer" },
+            "learningOutcomeCount": {
+              "type": "integer",
+              "description": "Total across all levels."
+            },
+            "estimatedContentGenerationSeconds": {
+              "type": "integer",
+              "description": "Estimate for the follow-up bulk content generation. Backs the 1c footer '28 subtopics - est. 4 min'."
+            }
+          }
+        },
+
+        "sources": {
+          "type": "array",
+          "description": "Powers the 'Sources used' panel in 1c. One entry per requested documentId, including any that ended up unused, so the teacher can see what was ignored.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "documentId": { "type": "string", "format": "uuid" },
+              "fileName": { "type": "string" },
+              "kind": {
+                "type": "string",
+                "enum": ["PDF", "PPTX", "DOCX", "EPUB", "TXT"]
+              },
+              "used": { "type": "boolean" },
+              "coverage": {
+                "type": "string",
+                "enum": ["HIGH", "MEDIUM", "LOW", "NONE"],
+                "description": "How much of the outline this document contributed to."
+              }
+            }
+          }
+        },
+
+        "warnings": {
+          "type": "array",
+          "description": "Non-fatal issues. The job still SUCCEEDED; these are advisory and safe to show in 1c.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "SOURCE_PARTIALLY_USED",
+                  "SOURCE_UNUSED",
+                  "STRUCTURE_TARGET_NOT_MET",
+                  "SPARSE_COVERAGE",
+                  "OUTCOMES_TRUNCATED"
+                ]
+              },
+              "message": { "type": "string" },
+              "documentId": {
+                "type": "string",
+                "format": "uuid",
+                "nullable": true
+              },
+              "logicalId": {
+                "type": "string",
+                "format": "uuid",
+                "nullable": true
+              }
+            }
+          }
+        },
+
+        "module": {
+          "type": "array",
+          "description": "Ordered modules. Key name is singular to match CreateLessonPlanDto.",
+          "items": { "$ref": "#/schemas/moduleNode" }
+        }
+      }
+    },
+
+    "moduleNode": {
+      "type": "object",
+      "properties": {
+        "logicalId": { "$ref": "#/schemas/fields/logicalId" },
+        "orderIndex": { "$ref": "#/schemas/fields/orderIndex" },
+        "title": { "type": "string", "maxLength": 200 },
+        "description": {
+          "type": "string",
+          "nullable": true,
+          "maxLength": 500,
+          "description": "Short summary. Maps to Module.description."
+        },
+        "overview": {
+          "type": "string",
+          "nullable": true,
+          "maxLength": 2000,
+          "description": "Longer narrative framing. Maps to Module.overview."
+        },
+        "learningOutcomes": { "$ref": "#/schemas/fields/learningOutcomes" },
+        "sourceRefs": { "$ref": "#/schemas/fields/sourceRefs" },
+        "chapter": {
+          "type": "array",
+          "items": { "$ref": "#/schemas/chapterNode" }
+        }
+      }
+    },
+
+    "chapterNode": {
+      "type": "object",
+      "properties": {
+        "logicalId": { "$ref": "#/schemas/fields/logicalId" },
+        "orderIndex": { "$ref": "#/schemas/fields/orderIndex" },
+        "title": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "nullable": true, "maxLength": 500 },
+        "overview": { "type": "string", "nullable": true, "maxLength": 2000 },
+        "learningOutcomes": { "$ref": "#/schemas/fields/learningOutcomes" },
+        "sourceRefs": { "$ref": "#/schemas/fields/sourceRefs" },
+        "lesson": {
+          "type": "array",
+          "items": { "$ref": "#/schemas/lessonNode" }
+        }
+      }
+    },
+
+    "lessonNode": {
+      "type": "object",
+      "properties": {
+        "logicalId": { "$ref": "#/schemas/fields/logicalId" },
+        "orderIndex": { "$ref": "#/schemas/fields/orderIndex" },
+        "title": { "type": "string", "maxLength": 200 },
+        "description": { "type": "string", "nullable": true, "maxLength": 500 },
+        "overview": { "type": "string", "nullable": true, "maxLength": 2000 },
+        "learningOutcomes": { "$ref": "#/schemas/fields/learningOutcomes" },
+        "sourceRefs": { "$ref": "#/schemas/fields/sourceRefs" },
+        "topic": { "type": "array", "items": { "$ref": "#/schemas/topicNode" } }
+      }
+    },
+
+    "topicNode": {
+      "type": "object",
+      "description": "No learningOutcomes - 1c shows outcome bullets on module/chapter/lesson only. Topic rows render title plus description as a subtitle.",
+      "properties": {
+        "logicalId": { "$ref": "#/schemas/fields/logicalId" },
+        "orderIndex": { "$ref": "#/schemas/fields/orderIndex" },
+        "title": { "type": "string", "maxLength": 200 },
+        "description": {
+          "type": "string",
+          "nullable": true,
+          "maxLength": 300,
+          "description": "Rendered as the grey subtitle on the TOPIC row in 1c.",
+          "example": "Reads, writes and growth behaviour"
+        },
+        "overview": { "type": "string", "nullable": true, "maxLength": 2000 },
+        "isMandatory": {
+          "type": "boolean",
+          "default": true,
+          "description": "Maps to Topics.isMandatory. Required by CreateTopicDto."
+        },
+        "sourceRefs": { "$ref": "#/schemas/fields/sourceRefs" },
+        "subTopic": {
+          "type": "array",
+          "items": { "$ref": "#/schemas/subTopicNode" }
+        }
+      }
+    },
+
+    "subTopicNode": {
+      "type": "object",
+      "description": "Leaf. Carries NO content field - subtopic content (explanation, examples, figure) is produced by the separate bulk content-generation contract driving screen 1d. In 1c these render with a Pending badge and a Generate action.",
+      "properties": {
+        "logicalId": { "$ref": "#/schemas/fields/logicalId" },
+        "orderIndex": { "$ref": "#/schemas/fields/orderIndex" },
+        "title": { "type": "string", "maxLength": 200 },
+        "isMandatory": {
+          "type": "boolean",
+          "default": true,
+          "description": "Maps to SubTopics.isMandatory. Required by CreateSubTopicDto."
+        },
+        "contentStatus": {
+          "type": "string",
+          "enum": ["PENDING"],
+          "description": "Always PENDING from this contract. The enum is widened (GENERATING, READY, FAILED) by the content-generation contract; declared here so 1c can render the badge from one field across both flows."
+        }
+      }
+    },
+
+    "fields": {
+      "logicalId": {
+        "type": "string",
+        "format": "uuid",
+        "description": "Stable identity for this node, generated by the AI service. The frontend keys tree rows by it, tracks manual edits against it, and the consumer persists it into the logicalId column that already exists on Module, Chapter, Lesson, Topics and SubTopics. On regenerate, nodes listed in regenerate.lockedLogicalIds are echoed back with the same logicalId - this is what makes 'Regenerating keeps your manual edits' work."
+      },
+      "orderIndex": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Zero-based position among siblings. Maps to the orderIndex column on ModuleMap / ChapterMap / lessonMap / TopicMap / subTopicMap. The frontend derives display tags ('MODULE 1', 'CH 1.1', 'LESSON 1.1.2') from this, which is why those strings are not in the payload - they must renumber on drag-reorder."
+      },
+      "learningOutcomes": {
+        "type": "array",
+        "items": { "type": "string", "maxLength": 300 },
+        "default": [],
+        "description": "Rendered as the bullet list on the highlighted card when a row is expanded in 1c. Each string is one complete, measurable outcome written against the requested Bloom's levels. Empty array when generation.outcomes.enabled is false or the level is excluded. Requires a new learningOutcomes String[] column - see contract.dependencies.",
+        "example": [
+          "Reason about arrays and memory layout to predict access cost and cache behaviour",
+          "Apply string algorithms and hashing to solve lookup and matching problems"
+        ]
+      },
+      "sourceRefs": {
+        "type": "array",
+        "default": [],
+        "description": "Where this node came from in the uploaded materials. Always populated when generation.sourceFidelity.strictSourceGrounding is true; best-effort otherwise. Enables a future 'why is this here' affordance and grounding audits.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "documentId": { "type": "string", "format": "uuid" },
+            "locator": {
+              "type": "string",
+              "description": "Human-readable position within the document - page range, slide number, or heading.",
+              "example": "pp. 1-4"
+            }
+          }
+        }
+      }
+    },
+
+    "outlineResultExample": {
+      "description": "Abridged - one fully expanded branch, siblings elided. Counts in summary reflect the full 3/6/12/16/28 tree from the 1c design mock.",
+      "value": {
+        "outlineId": "c4d8e0f2-1a35-4b79-8c6d-2e5f9a0b3c17",
+        "courseVersionId": "8c1e5d92-47b3-4a6f-9e02-1d5a8f4b6c37",
+        "generatedAt": "2026-08-18T10:30:31.000Z",
+        "model": { "provider": "anthropic", "name": "claude-opus-5" },
+        "summary": {
+          "moduleCount": 3,
+          "chapterCount": 6,
+          "lessonCount": 12,
+          "topicCount": 16,
+          "subTopicCount": 28,
+          "learningOutcomeCount": 21,
+          "estimatedContentGenerationSeconds": 240
+        },
+        "sources": [
+          {
+            "documentId": "d1a4b830-2e75-4f19-b6c3-8a2d5e9f0147",
+            "fileName": "DSA-Syllabus.pdf",
+            "kind": "PDF",
+            "used": true,
+            "coverage": "HIGH"
+          },
+          {
+            "documentId": "e2b5c941-3f86-4a2b-c7d4-9b3e6f0a1258",
+            "fileName": "Week1-4_Slides.pptx",
+            "kind": "PPTX",
+            "used": true,
+            "coverage": "MEDIUM"
+          },
+          {
+            "documentId": "f3c6da52-4097-4b3c-d8e5-0c4f7a1b2369",
+            "fileName": "Reference-Notes.docx",
+            "kind": "DOCX",
+            "used": true,
+            "coverage": "LOW"
+          }
+        ],
+        "warnings": [
+          {
+            "code": "SOURCE_PARTIALLY_USED",
+            "message": "Reference-Notes.docx covered material outside this course's scope.",
+            "documentId": "f3c6da52-4097-4b3c-d8e5-0c4f7a1b2369",
+            "logicalId": null
+          }
+        ],
+        "module": [
+          {
+            "logicalId": "11111111-1111-4111-8111-111111111111",
+            "orderIndex": 0,
+            "title": "Foundations of Data Structures",
+            "description": "Arrays, memory layout, strings and hashing.",
+            "overview": "Establishes the contiguous-memory model that the rest of the course builds on, then moves to string and hash-based lookup.",
+            "learningOutcomes": [
+              "Reason about arrays and memory layout to predict access cost and cache behaviour",
+              "Apply string algorithms and hashing to solve lookup and matching problems"
+            ],
+            "sourceRefs": [
+              {
+                "documentId": "d1a4b830-2e75-4f19-b6c3-8a2d5e9f0147",
+                "locator": "pp. 1-4"
+              }
+            ],
+            "chapter": [
+              {
+                "logicalId": "22222222-2222-4222-8222-222222222222",
+                "orderIndex": 0,
+                "title": "Arrays & Memory Layout",
+                "description": "Static and dynamic arrays, and how they sit in memory.",
+                "overview": null,
+                "learningOutcomes": [
+                  "Implement static and dynamic arrays, including resizing and growth strategies",
+                  "Represent and index multi-dimensional data in flat, contiguous memory"
+                ],
+                "sourceRefs": [],
+                "lesson": [
+                  {
+                    "logicalId": "33333333-3333-4333-8333-333333333333",
+                    "orderIndex": 0,
+                    "title": "Static & Dynamic Arrays",
+                    "description": "Core operations and the cost of growth.",
+                    "overview": null,
+                    "learningOutcomes": [
+                      "Perform and analyse core array operations - insert, delete, traverse and resize",
+                      "Explain how arrays map onto contiguous memory and why it drives performance"
+                    ],
+                    "sourceRefs": [],
+                    "topic": [
+                      {
+                        "logicalId": "44444444-4444-4444-8444-444444444444",
+                        "orderIndex": 0,
+                        "title": "Array Operations",
+                        "description": "Reads, writes and growth behaviour",
+                        "overview": null,
+                        "isMandatory": true,
+                        "sourceRefs": [],
+                        "subTopic": [
+                          {
+                            "logicalId": "55555555-5555-4555-8555-555555555551",
+                            "orderIndex": 0,
+                            "title": "Insertion & deletion",
+                            "isMandatory": true,
+                            "contentStatus": "PENDING"
+                          },
+                          {
+                            "logicalId": "55555555-5555-4555-8555-555555555552",
+                            "orderIndex": 1,
+                            "title": "Traversal & search",
+                            "isMandatory": true,
+                            "contentStatus": "PENDING"
+                          },
+                          {
+                            "logicalId": "55555555-5555-4555-8555-555555555553",
+                            "orderIndex": 2,
+                            "title": "Amortized resizing",
+                            "isMandatory": true,
+                            "contentStatus": "PENDING"
+                          }
+                        ]
+                      },
+                      {
+                        "logicalId": "44444444-4444-4444-8444-444444444445",
+                        "orderIndex": 1,
+                        "title": "Memory Representation",
+                        "description": "Row-major layout and cache effects",
+                        "overview": null,
+                        "isMandatory": true,
+                        "sourceRefs": [],
+                        "subTopic": [
+                          {
+                            "logicalId": "55555555-5555-4555-8555-555555555554",
+                            "orderIndex": 0,
+                            "title": "Contiguous allocation",
+                            "isMandatory": true,
+                            "contentStatus": "PENDING"
+                          },
+                          {
+                            "logicalId": "55555555-5555-4555-8555-555555555555",
+                            "orderIndex": 1,
+                            "title": "Cache locality",
+                            "isMandatory": true,
+                            "contentStatus": "PENDING"
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+
+  "errors": {
+    "envelope": { "$ref": "#/conventions/errorEnvelope" },
+    "catalog": [
+      {
+        "httpStatus": 400,
+        "errorCode": "INVALID_REQUEST",
+        "retryable": false,
+        "when": "Schema or validation failure - missing required field, bad enum, range max < min, documentIds empty or over 20.",
+        "details": "{ fieldErrors: [{ path, message }] }"
+      },
+      {
+        "httpStatus": 401,
+        "errorCode": "INVALID_API_KEY",
+        "retryable": false,
+        "when": "x-api-key missing or wrong."
+      },
+      {
+        "httpStatus": 404,
+        "errorCode": "DOCUMENT_NOT_FOUND",
+        "retryable": false,
+        "when": "A documentId is unknown, or belongs to another tenant. Cross-tenant ids resolve as 404, never 403, so ids cannot be probed.",
+        "details": "{ documentIds: [uuid] }"
+      },
+      {
+        "httpStatus": 404,
+        "errorCode": "JOB_NOT_FOUND",
+        "retryable": false,
+        "when": "Unknown jobId, a jobId from another tenant, or a terminal job past its 1-hour retention window."
+      },
+      {
+        "httpStatus": 409,
+        "errorCode": "JOB_ALREADY_TERMINAL",
+        "retryable": false,
+        "when": "Cancel called on a job already SUCCEEDED, FAILED or CANCELLED.",
+        "details": "{ status: '<current status>' }"
+      },
+      {
+        "httpStatus": 422,
+        "errorCode": "DOCUMENT_NOT_PROCESSED",
+        "retryable": true,
+        "when": "A document is still UPLOADING or PARSING, or its parse FAILED. Surfaces 1a's copy: \"Legacy-Notes.epub couldn't be parsed - re-export as PDF or retry.\"",
+        "details": "{ documents: [{ documentId, fileName, status }] }"
+      },
+      {
+        "httpStatus": 422,
+        "errorCode": "INSUFFICIENT_SOURCE_MATERIAL",
+        "retryable": false,
+        "when": "Parsed text is too thin to build a credible outline. Much more likely when strictSourceGrounding is true.",
+        "details": "{ extractedCharacters: 0, minimumRequired: 0 }"
+      },
+      {
+        "httpStatus": 429,
+        "errorCode": "RATE_LIMITED",
+        "retryable": true,
+        "when": "Too many concurrent jobs for this tenant. Retry-After header set."
+      },
+      {
+        "httpStatus": 429,
+        "errorCode": "QUOTA_EXCEEDED",
+        "retryable": false,
+        "when": "Tenant generation quota exhausted for the billing period."
+      },
+      {
+        "httpStatus": 500,
+        "errorCode": "MODEL_ERROR",
+        "retryable": true,
+        "when": "Upstream LLM failure or unparseable model output after internal retries. Also appears as a terminal job error on the poll endpoint."
+      },
+      {
+        "httpStatus": 503,
+        "errorCode": "SERVICE_UNAVAILABLE",
+        "retryable": true,
+        "when": "AI service draining or dependency down. Retry-After header set."
+      },
+      {
+        "httpStatus": 504,
+        "errorCode": "GENERATION_TIMEOUT",
+        "retryable": true,
+        "when": "Job exceeded its budget and passed expiresAt. Surfaces as a terminal job error on the poll endpoint, not as a 504 on submit."
+      }
+    ],
+    "note": "Failures discovered after the job is queued do NOT produce a non-2xx on the poll endpoint. jobStatus returns 200 with data.status = FAILED and data.error carrying the same errorCode/message/details, so the consumer keeps one error-handling path."
+  },
+
+  "dependencies": [
+    {
+      "id": "ingest-contract",
+      "blocking": true,
+      "summary": "Document ingest/parse contract does not exist yet.",
+      "detail": "documentIds presumes an upload+parse API called during screen 1a. It is what drives the per-file Uploading -> Processed / Parsing failed badges and 1b's '3 files processed' pill. There is also no CourseMaterial/Document model in the LMS Prisma schema today. This should be the next contract designed."
+    },
+    {
+      "id": "prisma-learning-outcomes",
+      "blocking": true,
+      "summary": "learningOutcomes has no column to persist into.",
+      "detail": "Add learningOutcomes String[] @default([]) to Module, Chapter and Lesson in prisma/models/{module,chapter,lesson}.prisma, plus a migration. No such field exists anywhere in the schema today."
+    },
+    {
+      "id": "lesson-plan-dto",
+      "blocking": true,
+      "summary": "CreateLessonPlanDto needs three optional additions to accept this payload.",
+      "detail": "In src/api/course/dto/lessonPlan.dto.ts: add optional logicalId and learningOutcomes to CreateModuleDto / CreateChapterDto / CreateLessonDto; add optional logicalId and orderIndex to CreateTopicDto and CreateSubTopicDto. Everything else already matches field-for-field."
+    },
+    {
+      "id": "lms-job-state",
+      "blocking": false,
+      "summary": "The LMS needs somewhere to hold jobId and status.",
+      "detail": "The teacher waits between 1b and 1c across page loads, so job state cannot live only in browser memory."
+    },
+    {
+      "id": "content-generation-contract",
+      "blocking": false,
+      "summary": "Bulk subtopic content generation (screen 1d) is a separate contract.",
+      "detail": "It widens subTopicNode.contentStatus beyond PENDING and fills SubTopics.content / examples / image."
+    },
+    {
+      "id": "assignment-contract",
+      "blocking": false,
+      "summary": "Assignment generation (screens 1m -> 1j / 1i) is a separate contract.",
+      "detail": "Note that the Assignment Prisma model currently requires classRoomId, startDate and dueDate, none of which exist at outline time."
+    }
+  ]
+}

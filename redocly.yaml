@@ -1,0 +1,33 @@
+apis:
+  ai-service:
+    root: ai-service/openapi.yaml
+
+extends:
+  - recommended
+
+rules:
+  # Internal service, not distributed — a license block would be noise.
+  info-license: off
+
+  # Enforce the conventions in README.md.
+  operation-operationId: error
+  operation-summary: error
+  operation-description: error
+  operation-4xx-response: error
+  tag-description: error
+  no-ambiguous-paths: error
+  no-identical-paths: error
+  path-declaration-must-exist: error
+  security-defined: error
+
+openapi:
+  theme:
+    colors:
+      primary:
+        main: "#4f46e5"
+  hideDownloadButton: false
+  expandResponses: "200,202"
+  jsonSampleExpandLevel: 3
+  pathInMiddlePanel: true
+  requiredPropsFirst: true
+  sortTagsAlphabetically: false

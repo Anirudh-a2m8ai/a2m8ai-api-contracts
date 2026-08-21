@@ -1,0 +1,32 @@
+{
+  "name": "@a2m8/api-contracts-web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Hosted, commentable reference for the A2M8 API contracts. Owner edits directly; everyone else proposes.",
+  "scripts": {
+    "predev": "node scripts/embed-spec.mjs",
+    "dev": "next dev",
+    "prebuild": "node scripts/embed-spec.mjs",
+    "build": "next build",
+    "start": "next start",
+    "check": "node scripts/check-permissions.mjs",
+    "session": "node scripts/dev-session.mjs",
+    "reset": "node scripts/reset-db.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@neondatabase/serverless": "^1.0.1",
+    "diff": "^8.0.2",
+    "next": "^15.5.4",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "typescript": "^5.9.2"
+  }
+}

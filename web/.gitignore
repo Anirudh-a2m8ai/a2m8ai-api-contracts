@@ -1,0 +1,12 @@
+node_modules/
+.next/
+.vercel/
+*.tsbuildinfo
+
+# Environment — never commit real secrets. See .env.example.
+.env
+.env.local
+.env*.local
+
+# Written by scripts/embed-spec.mjs from ai-service/openapi.yaml at build time.
+src/generated/

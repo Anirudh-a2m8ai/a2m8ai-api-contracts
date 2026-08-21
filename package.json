@@ -1,0 +1,18 @@
+{
+  "name": "@a2m8/api-contracts",
+  "version": "1.0.0",
+  "private": true,
+  "description": "API contracts between the college LMS backend and the services it calls.",
+  "scripts": {
+    "lint": "redocly lint",
+    "docs": "redocly build-docs ai-service/openapi.yaml -o docs/ai-service.html --disableGoogleFont && node build/inline-docs.mjs docs/ai-service.html",
+    "preview": "redocly preview-docs ai-service/openapi.yaml",
+    "bundle": "redocly bundle ai-service/openapi.yaml -o dist/ai-service.openapi.json",
+    "build": "npm run lint && npm run docs && npm run bundle",
+    "pull": "node build/pull-spec.mjs",
+    "web": "npm --prefix web run dev"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^2.46.1"
+  }
+}

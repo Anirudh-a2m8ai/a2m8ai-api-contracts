@@ -1,0 +1,12 @@
+node_modules/
+
+# Build outputs — regenerate with `npm run build`.
+# docs/ is committed deliberately (see README) so the HTML reference is
+# browsable straight from the repo without a build step. Remove the negation
+# below if you'd rather publish it from CI instead.
+dist/
+!docs/
+
+# Vercel CLI link data. The hosted app lives in web/ and has its own
+# .gitignore for .next/ and .env.local.
+.vercel/
