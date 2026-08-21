@@ -8,5 +8,14 @@ node_modules/
 .env.local
 .env*.local
 
-# Written by scripts/embed-spec.mjs from ai-service/openapi.yaml at build time.
-src/generated/
+# src/generated/seed-spec.ts is written by scripts/embed-spec.mjs from
+# ai-service/openapi.yaml, and is COMMITTED on purpose.
+#
+# Vercel deploys this directory as the project root, and its "include source
+# files outside of the Root Directory" setting is easy to leave off — in which
+# case ../ai-service/openapi.yaml is simply not in the build. Committing the
+# generated file means the build does not depend on that checkbox, and
+# `npm ci && npm run build` works in a standalone copy of web/.
+#
+# It cannot drift: predev and prebuild regenerate it whenever the contract is
+# reachable, which locally it always is.

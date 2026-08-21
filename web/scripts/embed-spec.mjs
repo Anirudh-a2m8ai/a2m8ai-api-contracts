@@ -22,7 +22,19 @@ const source = resolve(here, '..', '..', 'ai-service', 'openapi.yaml');
 const outFile = resolve(here, '..', 'src', 'generated', 'seed-spec.ts');
 
 if (!existsSync(source)) {
+  // Vercel can be configured to deploy web/ without the rest of the repo, so
+  // the contract is not always reachable at build time. The generated file is
+  // committed for exactly this case: fall back to it rather than failing a
+  // deploy over a checkbox.
+  if (existsSync(outFile)) {
+    console.log(
+      `embed-spec: ${source} is not in this build; keeping the committed ` +
+        'src/generated/seed-spec.ts.',
+    );
+    process.exit(0);
+  }
   console.error(`embed-spec: contract not found at ${source}`);
+  console.error('and no committed src/generated/seed-spec.ts to fall back on.');
   console.error('Run this from web/ inside the api-contracts repo.');
   process.exit(1);
 }

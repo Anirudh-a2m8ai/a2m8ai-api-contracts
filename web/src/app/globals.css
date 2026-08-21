@@ -705,11 +705,23 @@ pre.code {
 
 /* ------------------------------- editor ------------------------------- */
 
+/*
+ * A column flexbox, not a grid with counted rows.
+ *
+ * The number of children here varies: the submit bar, a result notice and a
+ * validation panel all come and go. A `grid-template-rows: auto minmax(0,1fr)`
+ * pins the growing row to whichever child happens to be second, which put the
+ * editor on top of the bar below it as soon as one more child appeared. With
+ * flex, the split grows and everything else keeps its natural height however
+ * many siblings there are.
+ */
 .editor-shell {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  display: flex;
+  flex-direction: column;
   height: calc(100dvh - var(--header-h));
 }
+.editor-shell > * { flex: none; }
+.editor-shell > .editor-split { flex: 1 1 auto; min-height: 0; }
 
 .editor-bar {
   display: flex;
@@ -783,3 +795,33 @@ pre.code {
 .list-item:hover { background: var(--bg-subtle); text-decoration: none; }
 .list-title { font-weight: 600; font-size: 15px; }
 .list-meta { margin-top: 3px; color: var(--text-faint); font-size: 12.5px; }
+
+/* ------------------------------- dialog ------------------------------- */
+
+/*
+ * Native <dialog>, so focus containment and Escape-to-close come from the
+ * browser rather than from a hand-rolled focus trap.
+ */
+.dialog {
+  width: min(560px, calc(100vw - 32px));
+  padding: 22px 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--panel);
+  color: var(--text);
+  box-shadow: var(--shadow-lg);
+}
+.dialog::backdrop {
+  background: rgb(10 12 16 / 0.55);
+  backdrop-filter: blur(2px);
+}
+
+.dialog-title { margin: 0 0 4px; font-size: 19px; font-weight: 650; letter-spacing: -0.01em; }
+.dialog-sub { margin: 0 0 18px; color: var(--text-muted); font-size: 13.5px; }
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}

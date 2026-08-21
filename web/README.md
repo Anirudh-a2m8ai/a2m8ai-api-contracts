@@ -20,18 +20,57 @@ diff is a far better bug report than a paragraph describing one.
 
 ## Deploying
 
+The OAuth callback has to name the deployment's own domain, which you do not know until the first
+deploy — so deploy first with no configuration, then fill it in. Nothing here is read at build time,
+so that first deploy succeeds and simply shows the contract read-only.
+
 1. Push this repo to GitHub.
 2. In Vercel, **Add New → Project**, import the repo, and set **Root Directory** to `web`.
-   Everything else is detected.
-3. **Storage → Create Database → Postgres**, and attach it to the project. That sets `POSTGRES_URL`.
-   The schema creates itself on the first request, and the contract committed in the repo is
-   adopted as version 1.
+   Framework, build and install commands are all detected. Deploy.
+3. Note the domain Vercel gives you, e.g. `https://api-contracts-xyz.vercel.app`.
 4. Register a GitHub OAuth app at <https://github.com/settings/developers>:
    - Homepage URL — `https://<your-app>.vercel.app`
    - Authorization callback URL — `https://<your-app>.vercel.app/api/auth/callback`
-5. Add the environment variables from [`.env.example`](.env.example): `OWNER_GITHUB_LOGIN`,
-   `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `SESSION_SECRET`, and `APP_URL`.
-6. Redeploy so the new variables take effect.
+
+   This must be a *separate* app from any you use locally: an OAuth app accepts exactly one
+   callback URL.
+5. **Storage → Create Database → Postgres**, attached to the project — or paste an existing Neon
+   connection string as `DATABASE_URL`. Use a different database from the one you develop against,
+   so local experiments cannot land in the published history.
+6. Add the environment variables below, for Production, Preview and Development.
+7. **Redeploy.** Environment variables are baked into a deployment; the existing one will not pick
+   them up.
+
+### Environment variables
+
+| Variable | Value | Set by |
+|---|---|---|
+| `OWNER_GITHUB_LOGIN` | your GitHub username | you |
+| `GITHUB_CLIENT_ID` | from the OAuth app | you |
+| `GITHUB_CLIENT_SECRET` | from the OAuth app | you |
+| `SESSION_SECRET` | a fresh 32-byte random hex string, **not** the local one | you |
+| `APP_URL` | `https://<your-app>.vercel.app`, no trailing slash | you |
+| `POSTGRES_URL` | connection string | Vercel Storage, automatically |
+| `DATABASE_URL` | connection string | you, only if bringing your own Neon |
+
+`POSTGRES_URL` and `DATABASE_URL` are interchangeable — set whichever your database gives you, not
+both. Generate the secret with:
+
+```bash
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+```
+
+`APP_URL` pins the OAuth `redirect_uri`. A GitHub OAuth app accepts exactly one callback URL and
+every preview deployment gets its own hostname, so without it sign-in works on production and fails
+on previews. With it, previews redirect back to production to complete sign-in.
+
+### About the Root Directory setting
+
+Vercel offers **"Include source files outside of the Root Directory in the Build Step"** alongside
+the Root Directory. This project builds either way: `src/generated/seed-spec.ts` is committed, and
+`scripts/embed-spec.mjs` falls back to it when `../ai-service/openapi.yaml` is not in the build.
+Leaving the option on is still preferable — the seed is then regenerated from the contract on every
+deploy rather than trusted from the commit.
 
 Without a database the site still serves the committed contract, read-only, and says so. Without
 OAuth credentials everything is readable but nobody can sign in. Neither case is a crash — a

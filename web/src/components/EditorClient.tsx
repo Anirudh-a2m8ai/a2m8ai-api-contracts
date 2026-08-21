@@ -21,11 +21,14 @@ export function EditorClient({
   viewer,
   dbReady,
   baseVersionLabel,
+  ownerLogin,
 }: {
   initialYaml: string;
   viewer: Viewer;
   dbReady: boolean;
   baseVersionLabel: string;
+  /** Named in the dialog so a contributor knows who is going to review this. */
+  ownerLogin: string | null;
 }) {
   const router = useRouter();
 
@@ -61,6 +64,15 @@ export function EditorClient({
     window.addEventListener('beforeunload', warn);
     return () => window.removeEventListener('beforeunload', warn);
   }, [dirty]);
+
+  const proposeDialog = useRef<HTMLDialogElement>(null);
+
+  function openProposeDialog() {
+    // Clear any error from a previous attempt so the dialog does not open
+    // already complaining about something the author has since fixed.
+    setResult(null);
+    proposeDialog.current?.showModal();
+  }
 
   const editorRef = useRef<Parameters<OnMount>[0] | null>(null);
   const onMount: OnMount = (editor, monaco) => {
@@ -201,34 +213,66 @@ export function EditorClient({
             id="primary-action"
             className="btn btn-primary btn-sm"
             type="button"
-            onClick={propose}
+            onClick={openProposeDialog}
             disabled={blocked}
+            title={!dirty ? 'Change something first' : undefined}
           >
-            {busy ? 'Submitting…' : 'Open edit request'}
+            Open edit request…
           </button>
         )}
       </div>
 
-      {!isOwner && viewer.role !== 'guest' ? (
-        <div className="editor-bar" style={{ borderTop: 0 }}>
+      {/*
+        Asked for at submit time rather than sitting in a bar above the editor.
+        A bare input up there was easy to type past and then be told, on click,
+        that a title was required — with no obvious place to put one. A native
+        <dialog> also brings focus handling and Escape-to-close with it.
+      */}
+      <dialog className="dialog" ref={proposeDialog}>
+        <h2 className="dialog-title">Open an edit request</h2>
+        <p className="dialog-sub">
+          Nothing is published yet. {ownerLogin ? <strong>{ownerLogin}</strong> : 'The contract owner'}{' '}
+          reviews your diff and decides whether it lands.
+        </p>
+
+        <label className="field">
+          <span className="field-label">Title</span>
           <input
             type="text"
             value={title}
-            placeholder="Title — e.g. “outline job needs a partial-result field”"
+            autoFocus
+            placeholder="e.g. the outline job needs a partial-result field"
             onChange={(event) => setTitle(event.target.value)}
-            style={{ flex: 1, minWidth: 200 }}
-            aria-label="Edit request title"
           />
-          <input
-            type="text"
+          <span className="field-hint">One line on what this changes.</span>
+        </label>
+
+        <label className="field">
+          <span className="field-label">Why (optional)</span>
+          <textarea
             value={body}
-            placeholder="Why (optional)"
+            rows={4}
+            placeholder="What problem does this solve? Anything the reviewer should know?"
             onChange={(event) => setBody(event.target.value)}
-            style={{ flex: 1, minWidth: 200 }}
-            aria-label="Why this change"
           />
+        </label>
+
+        {result?.kind === 'error' ? <div className="notice notice-error">{result.text}</div> : null}
+
+        <div className="dialog-actions">
+          <button className="btn" type="button" onClick={() => proposeDialog.current?.close()}>
+            Cancel
+          </button>
+          <button
+            className="btn btn-primary"
+            type="button"
+            onClick={propose}
+            disabled={busy || !title.trim()}
+          >
+            {busy ? 'Submitting…' : 'Submit edit request'}
+          </button>
         </div>
-      ) : null}
+      </dialog>
 
       {result ? (
         <div className={`notice ${result.kind === 'ok' ? 'notice-ok' : 'notice-error'}`} style={{ margin: '10px 16px 0' }}>

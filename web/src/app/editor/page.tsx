@@ -22,6 +22,7 @@ export default async function EditorPage() {
       initialYaml={current.yaml}
       viewer={viewer}
       dbReady={isDbConfigured()}
+      ownerLogin={process.env.OWNER_GITHUB_LOGIN?.trim() || null}
       baseVersionLabel={current.version ? `based on version ${current.version.id}` : 'from repo'}
     />
   );
