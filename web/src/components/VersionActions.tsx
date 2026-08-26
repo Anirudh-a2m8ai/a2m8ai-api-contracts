@@ -10,7 +10,15 @@ import { useState } from 'react';
  * so a revert is itself a version. The history stays append-only and the fact
  * that a revert happened remains visible.
  */
-export function VersionActions({ versionId, isCurrent }: { versionId: number; isCurrent: boolean }) {
+export function VersionActions({
+  spec,
+  versionId,
+  isCurrent,
+}: {
+  spec: string;
+  versionId: number;
+  isCurrent: boolean;
+}) {
   const router = useRouter();
   const [busy, setBusy] = useState(false);
 
@@ -19,14 +27,14 @@ export function VersionActions({ versionId, isCurrent }: { versionId: number; is
 
     setBusy(true);
     try {
-      const yamlResponse = await fetch(`/api/spec/versions?id=${versionId}`);
+      const yamlResponse = await fetch(`/api/specs/${spec}/versions?id=${versionId}`);
       if (!yamlResponse.ok) {
         alert('Could not read that version.');
         return;
       }
       const yaml = await yamlResponse.text();
 
-      const response = await fetch('/api/spec', {
+      const response = await fetch(`/api/specs/${spec}`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ yaml, message: `Reverted to version ${versionId}` }),
@@ -44,7 +52,7 @@ export function VersionActions({ versionId, isCurrent }: { versionId: number; is
 
   return (
     <div className="inline">
-      <a className="btn btn-ghost btn-sm" href={`/api/spec/versions?id=${versionId}`}>
+      <a className="btn btn-ghost btn-sm" href={`/api/specs/${spec}/versions?id=${versionId}`}>
         View YAML
       </a>
       {!isCurrent ? (

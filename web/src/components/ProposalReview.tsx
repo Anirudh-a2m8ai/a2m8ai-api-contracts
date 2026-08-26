@@ -17,12 +17,14 @@ type Tab = 'diff' | 'preview' | 'discussion';
  * owner alone — the decision.
  */
 export function ProposalReview({
+  spec,
   proposal,
   baseYaml,
   currentYaml,
   initialComments,
   viewer,
 }: {
+  spec: string;
   proposal: Proposal;
   /** The version the author started from. */
   baseYaml: string;
@@ -39,11 +41,13 @@ export function ProposalReview({
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
-    const response = await fetch(`/api/comments?proposalId=${proposal.id}`, { cache: 'no-store' });
+    const response = await fetch(`/api/specs/${spec}/comments?proposalId=${proposal.id}`, {
+      cache: 'no-store',
+    });
     if (!response.ok) return;
     const data = (await response.json()) as { comments: Comment[] };
     setComments(data.comments);
-  }, [proposal.id]);
+  }, [spec, proposal.id]);
 
   // The contract may have been edited while this request sat open, in which
   // case approving it silently reverts whatever landed in between.
@@ -62,7 +66,7 @@ export function ProposalReview({
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch(`/api/proposals/${proposal.id}`, {
+      const response = await fetch(`/api/specs/${spec}/proposals/${proposal.id}`, {
         method: 'PATCH',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ action, note }),
@@ -98,7 +102,7 @@ export function ProposalReview({
             {proposal.mergedVersionId ? ` · published as version ${proposal.mergedVersionId}` : null}
           </p>
         </div>
-        <a className="btn btn-sm" href="/proposals">
+        <a className="btn btn-sm" href={`/${spec}/proposals`}>
           All edit requests
         </a>
       </div>
@@ -173,6 +177,7 @@ export function ProposalReview({
       {tab === 'discussion' ? (
         <div className="card" style={{ padding: '16px' }}>
           <CommentThreadList
+            spec={spec}
             comments={comments}
             viewer={viewer}
             anchor={DISCUSSION_ANCHOR}

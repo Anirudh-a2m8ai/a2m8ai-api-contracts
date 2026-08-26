@@ -37,7 +37,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const viewer = await getViewer();
 
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_SCRIPT }} />
       </head>

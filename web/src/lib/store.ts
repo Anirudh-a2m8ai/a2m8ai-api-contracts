@@ -1,5 +1,4 @@
 import { db, isDbConfigured } from './db';
-import { API_ID } from './spec';
 import { anchorLabel } from './anchors';
 import type { Comment, Proposal, ProposalStatus, Viewer } from './types';
 
@@ -8,7 +7,11 @@ import type { Comment, Proposal, ProposalStatus, Viewer } from './types';
 // too and must not pull the database driver into the browser bundle.
 export { threadComments } from './thread';
 
-/** Queries for comments and edit requests. Authorisation happens in the routes. */
+/**
+ * Queries for comments and edit requests. Authorisation happens in the
+ * routes. Every exported function takes `spec` (a slug) as its first
+ * parameter — there is no implicit "the" spec anymore.
+ */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
@@ -50,46 +53,48 @@ function toProposal(row: any): Proposal {
 /* ------------------------------ comments ------------------------------ */
 
 /**
- * Every comment on the published contract, flat.
+ * Every comment on one spec's published contract, flat.
  *
  * The viewer needs counts for all anchors at once to draw the pin badges, and
  * the whole set is a single small query — cheaper than one request per anchor
  * as the reader scrolls.
  */
-export async function listSpecComments(): Promise<Comment[]> {
+export async function listSpecComments(spec: string): Promise<Comment[]> {
   if (!isDbConfigured()) return [];
   const sql = await db();
   const rows = await sql`
     SELECT * FROM comments
-    WHERE api_id = ${API_ID} AND proposal_id IS NULL
+    WHERE spec_slug = ${spec} AND proposal_id IS NULL
     ORDER BY id ASC
   `;
   return rows.map(toComment);
 }
 
-export async function listProposalComments(proposalId: number): Promise<Comment[]> {
+export async function listProposalComments(spec: string, proposalId: number): Promise<Comment[]> {
   if (!isDbConfigured()) return [];
   const sql = await db();
   const rows = await sql`
-    SELECT * FROM comments WHERE proposal_id = ${proposalId} ORDER BY id ASC
+    SELECT * FROM comments WHERE spec_slug = ${spec} AND proposal_id = ${proposalId} ORDER BY id ASC
   `;
   return rows.map(toComment);
 }
 
-
-export async function createComment(input: {
-  anchor: string;
-  anchorLabel: string;
-  body: string;
-  author: Viewer;
-  proposalId?: number | null;
-  parentId?: number | null;
-}): Promise<Comment> {
+export async function createComment(
+  spec: string,
+  input: {
+    anchor: string;
+    anchorLabel: string;
+    body: string;
+    author: Viewer;
+    proposalId?: number | null;
+    parentId?: number | null;
+  },
+): Promise<Comment> {
   const sql = await db();
   const rows = await sql`
-    INSERT INTO comments (api_id, anchor, anchor_label, proposal_id, parent_id, body, author_login, author_avatar)
+    INSERT INTO comments (spec_slug, anchor, anchor_label, proposal_id, parent_id, body, author_login, author_avatar)
     VALUES (
-      ${API_ID},
+      ${spec},
       ${input.anchor},
       ${input.anchorLabel},
       ${input.proposalId ?? null},
@@ -103,14 +108,15 @@ export async function createComment(input: {
   return toComment(rows[0]);
 }
 
-export async function getComment(id: number): Promise<Comment | null> {
+export async function getComment(spec: string, id: number): Promise<Comment | null> {
   if (!isDbConfigured()) return null;
   const sql = await db();
-  const rows = await sql`SELECT * FROM comments WHERE id = ${id}`;
+  const rows = await sql`SELECT * FROM comments WHERE id = ${id} AND spec_slug = ${spec}`;
   return rows.length ? toComment(rows[0]) : null;
 }
 
 export async function setCommentResolved(
+  spec: string,
   id: number,
   resolved: boolean,
   by: string,
@@ -119,21 +125,21 @@ export async function setCommentResolved(
   const rows = await sql`
     UPDATE comments
     SET resolved = ${resolved}, resolved_by = ${resolved ? by : null}
-    WHERE id = ${id}
+    WHERE id = ${id} AND spec_slug = ${spec}
     RETURNING *
   `;
   return rows.length ? toComment(rows[0]) : null;
 }
 
 /** Replies cascade via the FK, so a deleted thread takes its replies with it. */
-export async function deleteComment(id: number): Promise<void> {
+export async function deleteComment(spec: string, id: number): Promise<void> {
   const sql = await db();
-  await sql`DELETE FROM comments WHERE id = ${id}`;
+  await sql`DELETE FROM comments WHERE id = ${id} AND spec_slug = ${spec}`;
 }
 
 /* ----------------------------- proposals ------------------------------ */
 
-export async function listProposals(): Promise<Proposal[]> {
+export async function listProposals(spec: string): Promise<Proposal[]> {
   if (!isDbConfigured()) return [];
   const sql = await db();
   // Open first, then newest — the owner's queue is what this page is for.
@@ -143,31 +149,34 @@ export async function listProposals(): Promise<Proposal[]> {
            p.resolved_by, p.resolved_at, p.created_at,
            (SELECT count(*) FROM comments c WHERE c.proposal_id = p.id) AS comment_count
     FROM proposals p
-    WHERE p.api_id = ${API_ID}
+    WHERE p.spec_slug = ${spec}
     ORDER BY (p.status = 'open') DESC, p.id DESC
   `;
   return rows.map(toProposal);
 }
 
-export async function getProposal(id: number): Promise<Proposal | null> {
+export async function getProposal(spec: string, id: number): Promise<Proposal | null> {
   if (!isDbConfigured()) return null;
   const sql = await db();
-  const rows = await sql`SELECT * FROM proposals WHERE id = ${id} AND api_id = ${API_ID}`;
+  const rows = await sql`SELECT * FROM proposals WHERE id = ${id} AND spec_slug = ${spec}`;
   return rows.length ? toProposal(rows[0]) : null;
 }
 
-export async function createProposal(input: {
-  title: string;
-  body: string;
-  yaml: string;
-  baseVersionId: number | null;
-  author: Viewer;
-}): Promise<Proposal> {
+export async function createProposal(
+  spec: string,
+  input: {
+    title: string;
+    body: string;
+    yaml: string;
+    baseVersionId: number | null;
+    author: Viewer;
+  },
+): Promise<Proposal> {
   const sql = await db();
   const rows = await sql`
-    INSERT INTO proposals (api_id, title, body, yaml, base_version_id, author_login, author_avatar)
+    INSERT INTO proposals (spec_slug, title, body, yaml, base_version_id, author_login, author_avatar)
     VALUES (
-      ${API_ID},
+      ${spec},
       ${input.title},
       ${input.body},
       ${input.yaml},
@@ -187,13 +196,16 @@ export async function createProposal(input: {
  * approval racing the first updates zero rows and returns null, so the same
  * proposal cannot be merged twice into two versions.
  */
-export async function resolveProposal(input: {
-  id: number;
-  status: Exclude<ProposalStatus, 'open'>;
-  by: string;
-  note: string;
-  mergedVersionId?: number | null;
-}): Promise<Proposal | null> {
+export async function resolveProposal(
+  spec: string,
+  input: {
+    id: number;
+    status: Exclude<ProposalStatus, 'open'>;
+    by: string;
+    note: string;
+    mergedVersionId?: number | null;
+  },
+): Promise<Proposal | null> {
   const sql = await db();
   const rows = await sql`
     UPDATE proposals
@@ -202,7 +214,7 @@ export async function resolveProposal(input: {
         resolved_at = now(),
         resolution_note = ${input.note},
         merged_version_id = ${input.mergedVersionId ?? null}
-    WHERE id = ${input.id} AND api_id = ${API_ID} AND status = 'open'
+    WHERE id = ${input.id} AND spec_slug = ${spec} AND status = 'open'
     RETURNING *
   `;
   return rows.length ? toProposal(rows[0]) : null;
@@ -218,26 +230,31 @@ export async function resolveProposal(input: {
  * read `open` — or worse, a spec_versions row with no proposal pointing at it.
  * `FOR UPDATE` plus the `status = 'open'` predicate makes a second, concurrent
  * approval a no-op that returns null instead of publishing the same change
- * twice.
+ * twice. `spec_slug` sits only in the locked `src` CTE's WHERE (and the
+ * `published` insert's value list) — it is immutable per row, so unlike
+ * `status = 'open'` it does not need to participate in the compare-and-set.
  *
  * Returns null when the proposal is missing or is no longer open.
  */
-export async function mergeProposal(input: {
-  id: number;
-  by: Viewer;
-  note: string;
-  message: string;
-}): Promise<{ proposal: Proposal; versionId: number | null } | null> {
+export async function mergeProposal(
+  spec: string,
+  input: {
+    id: number;
+    by: Viewer;
+    note: string;
+    message: string;
+  },
+): Promise<{ proposal: Proposal; versionId: number | null } | null> {
   const sql = await db();
   const rows = await sql`
     WITH src AS (
       SELECT id, yaml FROM proposals
-      WHERE id = ${input.id} AND api_id = ${API_ID} AND status = 'open'
+      WHERE id = ${input.id} AND spec_slug = ${spec} AND status = 'open'
       FOR UPDATE
     ),
     published AS (
-      INSERT INTO spec_versions (api_id, yaml, message, author_login, author_avatar, from_proposal)
-      SELECT ${API_ID}, src.yaml, ${input.message}, ${input.by.login}, ${input.by.avatar}, src.id
+      INSERT INTO spec_versions (spec_slug, yaml, message, author_login, author_avatar, from_proposal)
+      SELECT ${spec}, src.yaml, ${input.message}, ${input.by.login}, ${input.by.avatar}, src.id
       FROM src
       RETURNING id
     )

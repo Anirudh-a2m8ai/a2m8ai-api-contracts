@@ -1,6 +1,8 @@
 apis:
-  ai-service:
-    root: ai-service/openapi.yaml
+  course-outline:
+    root: course-outline/openapi.yaml
+  content-generation:
+    root: content-generation/openapi.yaml
 
 extends:
   - recommended
@@ -8,6 +10,14 @@ extends:
 rules:
   # Internal service, not distributed — a license block would be noise.
   info-license: off
+
+  # SuccessEnvelope requires `data` without declaring it: every operation
+  # supplies its own `data` shape through allOf (see README, "Response
+  # envelopes"). Since the split, each schema is also linted as its own file,
+  # where that allOf sibling is not in view — so the rule fires on the base
+  # envelope every time. The pattern is deliberate, so the rule is not useful
+  # for this contract.
+  no-required-schema-properties-undefined: off
 
   # Enforce the conventions in README.md.
   operation-operationId: error

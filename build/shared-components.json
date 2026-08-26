@@ -1,0 +1,35 @@
+{
+  "schemas": [
+    "CancelResponse",
+    "CountRange",
+    "CourseMetadata",
+    "Designation",
+    "ErrorCode",
+    "ErrorResponse",
+    "JobAccepted",
+    "JobAcceptedResponse",
+    "JobError",
+    "LearningOutcomes",
+    "LocaleOptions",
+    "LogicalId",
+    "ModelInfo",
+    "OrderIndex",
+    "SourceFidelityOptions",
+    "SourceRef",
+    "SourceRefs",
+    "SourceUsage",
+    "SuccessEnvelope"
+  ],
+  "responses": [
+    "BadRequest",
+    "Unauthorized",
+    "RateLimited",
+    "ServiceUnavailable",
+    "UnprocessableSource",
+    "JobNotFound",
+    "JobAlreadyTerminal"
+  ],
+  "parameters": ["TenantId", "RequestId", "IdempotencyKey", "JobId"],
+  "headers": ["XRequestId", "RetryAfter"],
+  "securitySchemes": ["ApiKeyAuth"]
+}

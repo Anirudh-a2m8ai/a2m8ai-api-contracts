@@ -13,6 +13,7 @@ import { Time } from './Time';
  * drifting.
  */
 export function CommentThreadList({
+  spec,
   comments,
   viewer,
   anchor,
@@ -21,6 +22,7 @@ export function CommentThreadList({
   onChanged,
   emptyText = 'No comments here yet.',
 }: {
+  spec: string;
   comments: Comment[];
   viewer: Viewer;
   anchor: string;
@@ -37,13 +39,13 @@ export function CommentThreadList({
 
       {threads.map((thread) => (
         <article className="thread" key={thread.id} data-resolved={thread.resolved}>
-          <CommentBody comment={thread} viewer={viewer} onChanged={onChanged} canResolve />
+          <CommentBody spec={spec} comment={thread} viewer={viewer} onChanged={onChanged} canResolve />
 
           {thread.replies.length ? (
             <div className="replies">
               {thread.replies.map((reply) => (
                 <div className="reply" key={reply.id}>
-                  <CommentBody comment={reply} viewer={viewer} onChanged={onChanged} />
+                  <CommentBody spec={spec} comment={reply} viewer={viewer} onChanged={onChanged} />
                 </div>
               ))}
             </div>
@@ -51,6 +53,7 @@ export function CommentThreadList({
 
           {viewer.role !== 'guest' ? (
             <Composer
+              spec={spec}
               anchor={anchor}
               anchorLabel={anchorLabel}
               proposalId={proposalId}
@@ -67,6 +70,7 @@ export function CommentThreadList({
         <SignInPrompt />
       ) : (
         <Composer
+          spec={spec}
           anchor={anchor}
           anchorLabel={anchorLabel}
           proposalId={proposalId}
@@ -101,11 +105,13 @@ function currentPath(): string {
 }
 
 function CommentBody({
+  spec,
   comment,
   viewer,
   onChanged,
   canResolve = false,
 }: {
+  spec: string;
   comment: Comment;
   viewer: Viewer;
   onChanged: () => void;
@@ -119,7 +125,7 @@ function CommentBody({
   async function act(method: 'PATCH' | 'DELETE', body?: unknown) {
     setBusy(true);
     try {
-      const response = await fetch(`/api/comments/${comment.id}`, {
+      const response = await fetch(`/api/specs/${spec}/comments/${comment.id}`, {
         method,
         headers: body ? { 'content-type': 'application/json' } : undefined,
         body: body ? JSON.stringify(body) : undefined,
@@ -180,6 +186,7 @@ function CommentBody({
 }
 
 function Composer({
+  spec,
   anchor,
   anchorLabel,
   proposalId,
@@ -188,6 +195,7 @@ function Composer({
   placeholder,
   compact = false,
 }: {
+  spec: string;
   anchor: string;
   anchorLabel: string;
   proposalId: number | null;
@@ -207,7 +215,7 @@ function Composer({
     setBusy(true);
     setError(null);
     try {
-      const response = await fetch('/api/comments', {
+      const response = await fetch(`/api/specs/${spec}/comments`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ anchor, anchorLabel, body, proposalId, parentId }),

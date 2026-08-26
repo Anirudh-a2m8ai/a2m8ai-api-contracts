@@ -13,6 +13,11 @@ import { Pin } from './Pin';
  * envelopes with `allOf`, so eagerly expanding everything would bury the two
  * fields an operation actually adds under the same wrapper repeated on every
  * endpoint.
+ *
+ * Depth is carried in the markup rather than in inline padding: each level
+ * nests inside a `.schema-branch`, which draws the guide line that tells a
+ * reader which parent a field hangs off. Twelve fields at three depths with no
+ * guide is the part of the old layout that read as a wall.
  */
 
 const MAX_DEPTH = 6;
@@ -36,7 +41,7 @@ export function SchemaTree({
   if (!resolved || typeof resolved !== 'object') return null;
 
   if (depth > MAX_DEPTH) {
-    return <p className="faint small">Nested further — open the YAML to read the rest.</p>;
+    return <p className="schema-note">Nested further — open the YAML to read the rest.</p>;
   }
 
   // allOf is how every response in this contract layers its own `data` onto
@@ -61,15 +66,11 @@ export function SchemaTree({
   const variants: Json[] | undefined = resolved.oneOf ?? resolved.anyOf;
   if (Array.isArray(variants)) {
     return (
-      <div className="stack">
-        <p className="faint small" style={{ margin: 0 }}>
-          {resolved.oneOf ? 'One of:' : 'Any of:'}
-        </p>
+      <div className="schema-variants">
+        <p className="schema-note">{resolved.oneOf ? 'One of:' : 'Any of:'}</p>
         {variants.map((variant: Json, index: number) => (
-          <div key={index} className="nested">
-            <div className="row-type" style={{ marginLeft: 0 }}>
-              {typeLabel(doc, variant)}
-            </div>
+          <div key={index} className="schema-branch">
+            <div className="schema-branch-label">{typeLabel(doc, variant)}</div>
             <SchemaTree
               doc={doc}
               schema={variant}
@@ -85,10 +86,8 @@ export function SchemaTree({
 
   if (resolved.type === 'array' && resolved.items) {
     return (
-      <div className="nested">
-        <div className="row-type" style={{ marginLeft: 0 }}>
-          array of {typeLabel(doc, resolved.items)}
-        </div>
+      <div className="schema-branch">
+        <div className="schema-branch-label">array of {typeLabel(doc, resolved.items)}</div>
         <SchemaTree
           doc={doc}
           schema={resolved.items}
@@ -102,14 +101,25 @@ export function SchemaTree({
 
   const properties: Record<string, Json> | undefined = resolved.properties;
   if (!properties || !Object.keys(properties).length) {
-    return resolved.description ? <Markdown className="small">{resolved.description}</Markdown> : null;
+    return resolved.description ? (
+      <Markdown className="field-desc small">{resolved.description}</Markdown>
+    ) : null;
   }
 
   const required: string[] = resolved.required ?? [];
 
+  // Required first, matching `requiredPropsFirst` in redocly.yaml, so the
+  // hosted reference and the offline HTML order fields the same way. Within
+  // each half the contract's own ordering is kept.
+  const entries = Object.entries(properties);
+  const ordered = [
+    ...entries.filter(([name]) => required.includes(name)),
+    ...entries.filter(([name]) => !required.includes(name)),
+  ];
+
   return (
-    <div>
-      {Object.entries(properties).map(([name, property]) => (
+    <div className="schema-fields">
+      {ordered.map(([name, property]) => (
         <PropertyRow
           key={name}
           doc={doc}
@@ -146,57 +156,67 @@ function PropertyRow({
   const resolved = deref(doc, property);
 
   // Whether there is anything worth expanding into.
-  const expandable =
+  const expandable = Boolean(
     resolved &&
-    typeof resolved === 'object' &&
-    (resolved.properties ||
-      resolved.allOf ||
-      resolved.oneOf ||
-      resolved.anyOf ||
-      (resolved.type === 'array' && deref(doc, resolved.items)?.properties));
+      typeof resolved === 'object' &&
+      (resolved.properties ||
+        resolved.allOf ||
+        resolved.oneOf ||
+        resolved.anyOf ||
+        (resolved.type === 'array' && deref(doc, resolved.items)?.properties)),
+  );
 
   const anchor = partAnchor(anchorBase, anchorPath);
   const isRef = typeof property?.$ref === 'string';
 
   return (
-    <div className="row">
-      <div className="row-main">
-        <div className="inline" style={{ gap: 6 }}>
-          <span className="row-name">{name}</span>
-          <span className="row-type">{typeLabel(doc, property)}</span>
-          {required ? <span className="pill pill-required">required</span> : null}
-          {resolved?.deprecated ? <span className="pill pill-warn">deprecated</span> : null}
-          {isRef ? <span className="pill">{refName(property.$ref)}</span> : null}
-          <Pin anchor={anchor} label={`${anchorBase} › ${anchorPath}`} />
-        </div>
-
-        {resolved?.description ? (
-          <div className="row-desc">
-            <InlineMarkdown>{resolved.description}</InlineMarkdown>
-          </div>
-        ) : null}
-
-        <ConstraintList schema={resolved} />
-
+    <div className="field-row" data-expandable={expandable} data-open={open}>
+      <div className="field-key">
+        {/*
+          The caret sits on the name rather than under the description, where
+          it used to be. A control that opens a field belongs beside the field
+          it opens; below the prose it read as a separate list item.
+        */}
         {expandable ? (
-          <>
-            <button className="btn btn-ghost btn-sm" type="button" onClick={() => setOpen(!open)}>
-              {open ? '▾ hide' : '▸ show'} {name}
-            </button>
-            {open ? (
-              <div className="nested">
-                <SchemaTree
-                  doc={doc}
-                  schema={property}
-                  anchorBase={anchorBase}
-                  anchorPath={anchorPath}
-                  depth={depth + 1}
-                />
-              </div>
-            ) : null}
-          </>
-        ) : null}
+          <button
+            className="field-caret"
+            type="button"
+            onClick={() => setOpen(!open)}
+            aria-expanded={open}
+            aria-label={`${open ? 'Hide' : 'Show'} ${name}`}
+          >
+            {open ? '▾' : '▸'}
+          </button>
+        ) : (
+          <span className="field-caret field-caret-empty" aria-hidden />
+        )}
+        <span className="field-name">{name}</span>
+        <span className="field-type">{typeLabel(doc, property)}</span>
+        {required ? <span className="field-required">required</span> : null}
+        {resolved?.deprecated ? <span className="pill pill-warn">deprecated</span> : null}
+        {isRef ? <span className="field-tag">{refName(property.$ref)}</span> : null}
+        <Pin anchor={anchor} label={`${anchorBase} › ${anchorPath}`} />
       </div>
+
+      {resolved?.description ? (
+        <div className="field-desc">
+          <InlineMarkdown>{resolved.description}</InlineMarkdown>
+        </div>
+      ) : null}
+
+      <ConstraintList schema={resolved} />
+
+      {expandable && open ? (
+        <div className="schema-branch">
+          <SchemaTree
+            doc={doc}
+            schema={property}
+            anchorBase={anchorBase}
+            anchorPath={anchorPath}
+            depth={depth + 1}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -205,25 +225,58 @@ function PropertyRow({
 function ConstraintList({ schema }: { schema: Json }) {
   if (!schema || typeof schema !== 'object') return null;
 
-  const bits: string[] = [];
-  if (schema.enum) bits.push(`one of: ${schema.enum.join(', ')}`);
-  if (schema.default !== undefined) bits.push(`default: ${JSON.stringify(schema.default)}`);
-  if (schema.minimum !== undefined) bits.push(`min ${schema.minimum}`);
-  if (schema.maximum !== undefined) bits.push(`max ${schema.maximum}`);
-  if (schema.minLength !== undefined) bits.push(`min length ${schema.minLength}`);
-  if (schema.maxLength !== undefined) bits.push(`max length ${schema.maxLength}`);
-  if (schema.minItems !== undefined) bits.push(`min items ${schema.minItems}`);
-  if (schema.maxItems !== undefined) bits.push(`max items ${schema.maxItems}`);
-  if (schema.pattern) bits.push(`pattern ${schema.pattern}`);
-  if (schema.example !== undefined) bits.push(`example: ${JSON.stringify(schema.example)}`);
+  const bits: { label: string; value: string }[] = [];
+  const add = (label: string, value: unknown) => bits.push({ label, value: String(value) });
+
+  if (schema.enum) {
+    // Enums are the constraint readers scan for, so each member is its own
+    // chip rather than one long comma-joined run.
+    return (
+      <div className="constraints">
+        <span className="constraint-label">one of</span>
+        {schema.enum.map((value: Json) => (
+          <span className="constraint constraint-enum" key={String(value)}>
+            {String(value)}
+          </span>
+        ))}
+        <ScalarConstraints schema={schema} />
+      </div>
+    );
+  }
+
+  if (schema.default !== undefined) add('default', JSON.stringify(schema.default));
+  if (schema.minimum !== undefined) add('min', schema.minimum);
+  if (schema.maximum !== undefined) add('max', schema.maximum);
+  if (schema.minLength !== undefined) add('min length', schema.minLength);
+  if (schema.maxLength !== undefined) add('max length', schema.maxLength);
+  if (schema.minItems !== undefined) add('min items', schema.minItems);
+  if (schema.maxItems !== undefined) add('max items', schema.maxItems);
+  if (schema.pattern) add('pattern', schema.pattern);
+  if (schema.example !== undefined) add('example', JSON.stringify(schema.example));
   // A house extension: rules JSON Schema cannot express, per the repo README.
-  if (schema['x-constraint']) bits.push(String(schema['x-constraint']));
+  if (schema['x-constraint']) bits.push({ label: '', value: String(schema['x-constraint']) });
 
   if (!bits.length) return null;
 
   return (
-    <div className="faint small mono" style={{ marginTop: 2 }}>
-      {bits.join(' · ')}
+    <div className="constraints">
+      {bits.map((bit, index) => (
+        <span className="constraint" key={index}>
+          {bit.label ? <span className="constraint-label">{bit.label}</span> : null}
+          {bit.value}
+        </span>
+      ))}
     </div>
+  );
+}
+
+/** The non-enum constraints, for a schema that also has an enum. */
+function ScalarConstraints({ schema }: { schema: Json }) {
+  if (schema.default === undefined) return null;
+  return (
+    <span className="constraint">
+      <span className="constraint-label">default</span>
+      {JSON.stringify(schema.default)}
+    </span>
   );
 }

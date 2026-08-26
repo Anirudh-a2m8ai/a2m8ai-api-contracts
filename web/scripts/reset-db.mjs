@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 /**
- * Empties the comments, edit requests and version history, so the next request
- * re-seeds from the contract committed in the repo.
+ * Empties the comments, edit requests and version history for every spec, so
+ * the next request re-seeds each one from the contract committed in the repo.
  *
  *   npm run reset -- --yes
  *
  * For clearing out test data while you are trying the app. It does not touch
- * ai-service/openapi.yaml — that file is the thing it resets *to*.
+ * the `specs` registry row itself (that's code-managed, reseeded by
+ * ensureSchema()) or any spec's source files — those are the things it
+ * resets *to*.
  *
  * `--yes` is required rather than a prompt, because this is destructive and
  * runs against whatever DATABASE_URL happens to be set. It prints what it is
@@ -75,4 +77,4 @@ if (!process.argv.includes('--yes')) {
 // rather than continuing the old sequence.
 await sql`TRUNCATE comments, proposals, spec_versions RESTART IDENTITY CASCADE`;
 
-console.log('\nCleared. The next page load reseeds version 1 from ai-service/openapi.yaml.\n');
+console.log('\nCleared. The next page load reseeds version 1 for each spec from its committed contract.\n');

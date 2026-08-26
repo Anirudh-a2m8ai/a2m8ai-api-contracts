@@ -17,6 +17,12 @@
  * that the owner gets through cannot cost you a version. `--write` adds the
  * positive write cases, each of which cleans up after itself.
  *
+ * Every route now takes a spec slug (/api/specs/:spec/...) since the app
+ * hosts more than one contract. This script exercises the boundary against
+ * one spec (course-outline) — the auth check itself is spec-agnostic
+ * (web/src/lib/auth.ts), so there is nothing to learn from repeating every
+ * assertion against the second spec too.
+ *
  * Run it after touching src/lib/auth.ts or anything under src/app/api.
  */
 
@@ -31,6 +37,7 @@ const envFile = resolve(here, '..', '.env.local');
 const args = process.argv.slice(2);
 const WRITE = args.includes('--write');
 const BASE = (args.find((a) => !a.startsWith('--')) || 'http://localhost:3000').replace(/\/+$/, '');
+const SPEC = 'course-outline';
 
 if (!existsSync(envFile)) {
   console.error('web/.env.local not found. Copy web/.env.example to web/.env.local first.');
@@ -111,38 +118,48 @@ async function expect(name, request, wanted) {
   return response;
 }
 
-console.log(`\nchecking ${BASE}${WRITE ? '  (--write: writes will be made and then undone)' : ''}\n`);
+console.log(`\nchecking ${BASE} (spec: ${SPEC})${WRITE ? '  (--write: writes will be made and then undone)' : ''}\n`);
 
 console.log('reading is open to everyone');
-await expect('guest reads the contract', { path: '/api/spec' }, 200);
-await expect('guest reads it as JSON', { path: '/api/spec?format=json' }, 200);
-await expect('guest reads comments', { path: '/api/comments' }, [200, 503]);
-await expect('guest reads edit requests', { path: '/api/proposals' }, [200, 503]);
-await expect('guest reads version history', { path: '/api/spec/versions' }, [200, 503]);
-await expect('guest loads the reference', { path: '/' }, 200);
-await expect('guest loads the editor', { path: '/editor' }, 200);
+await expect('guest reads the contract', { path: `/api/specs/${SPEC}` }, 200);
+await expect('guest reads it as JSON', { path: `/api/specs/${SPEC}?format=json` }, 200);
+await expect('guest reads comments', { path: `/api/specs/${SPEC}/comments` }, [200, 503]);
+await expect('guest reads edit requests', { path: `/api/specs/${SPEC}/proposals` }, [200, 503]);
+await expect('guest reads version history', { path: `/api/specs/${SPEC}/versions` }, [200, 503]);
+await expect('an unknown spec 404s', { path: '/api/specs/not-a-real-spec' }, 404);
+await expect('guest loads the landing page', { path: '/' }, 200);
+await expect('guest loads the reference', { path: `/${SPEC}` }, 200);
+await expect('guest loads the editor', { path: `/${SPEC}/editor` }, 200);
 
 console.log('\nonly the owner may change the contract');
 // Everyone below the owner is refused before the body is looked at at all, so
 // the stub here can never land.
 const stubEdit = { yaml: STUB_SPEC, message: 'must not land' };
-await expect('guest is refused', { method: 'PUT', path: '/api/spec', body: stubEdit }, 401);
+await expect('guest is refused', { method: 'PUT', path: `/api/specs/${SPEC}`, body: stubEdit }, 401);
 await expect(
   'signed-in contributor is refused',
-  { method: 'PUT', path: '/api/spec', cookie: CONTRIBUTOR, body: stubEdit },
+  { method: 'PUT', path: `/api/specs/${SPEC}`, cookie: CONTRIBUTOR, body: stubEdit },
   403,
 );
-await expect('forged owner cookie is refused', { method: 'PUT', path: '/api/spec', cookie: FORGED, body: stubEdit }, 401);
-await expect('expired owner cookie is refused', { method: 'PUT', path: '/api/spec', cookie: EXPIRED, body: stubEdit }, 401);
+await expect(
+  'forged owner cookie is refused',
+  { method: 'PUT', path: `/api/specs/${SPEC}`, cookie: FORGED, body: stubEdit },
+  401,
+);
+await expect(
+  'expired owner cookie is refused',
+  { method: 'PUT', path: `/api/specs/${SPEC}`, cookie: EXPIRED, body: stubEdit },
+  401,
+);
 
 // The owner WOULD be let through, so hand back exactly what is already
 // published. The route's no-op guard answers `unchanged` without inserting a
 // version: the boundary is proven and nothing is written.
-const publishedYaml = await (await call({ path: '/api/spec' })).text();
+const publishedYaml = await (await call({ path: `/api/specs/${SPEC}` })).text();
 const roundTrip = { yaml: publishedYaml, message: 'permission check round-trip' };
 const ownerResponse = await expect(
   'owner is let through (round-trips the published contract)',
-  { method: 'PUT', path: '/api/spec', cookie: OWNER_COOKIE, body: roundTrip },
+  { method: 'PUT', path: `/api/specs/${SPEC}`, cookie: OWNER_COOKIE, body: roundTrip },
   [200, 503],
 );
 if (ownerResponse?.status === 200) {
@@ -153,54 +170,67 @@ if (ownerResponse?.status === 200) {
 }
 await expect(
   'owner login matches case-insensitively',
-  { method: 'PUT', path: '/api/spec', cookie: OWNER_ODD_CASE, body: roundTrip },
+  { method: 'PUT', path: `/api/specs/${SPEC}`, cookie: OWNER_ODD_CASE, body: roundTrip },
   [200, 503],
 );
 
 console.log('\nonly the owner may decide an edit request');
 await expect(
   'guest cannot approve',
-  { method: 'PATCH', path: '/api/proposals/1', body: { action: 'approve' } },
+  { method: 'PATCH', path: `/api/specs/${SPEC}/proposals/1`, body: { action: 'approve' } },
   [401, 404, 503],
 );
 await expect(
   'contributor cannot approve',
-  { method: 'PATCH', path: '/api/proposals/1', cookie: CONTRIBUTOR, body: { action: 'approve' } },
+  { method: 'PATCH', path: `/api/specs/${SPEC}/proposals/1`, cookie: CONTRIBUTOR, body: { action: 'approve' } },
   [403, 404, 503],
 );
 
 console.log('\ncommenting needs a sign-in, nothing more');
-await expect('guest cannot comment', { method: 'POST', path: '/api/comments', body: { anchor: 'info', body: 'hi' } }, 401);
+await expect(
+  'guest cannot comment',
+  { method: 'POST', path: `/api/specs/${SPEC}/comments`, body: { anchor: 'info', body: 'hi' } },
+  401,
+);
 // An empty body is rejected at validation, which is past the auth gate — a 400
 // here rather than a 401/403 is what proves a contributor may comment.
 await expect(
   'contributor reaches validation, not a 403',
-  { method: 'POST', path: '/api/comments', cookie: CONTRIBUTOR, body: { anchor: 'info', body: '   ' } },
+  { method: 'POST', path: `/api/specs/${SPEC}/comments`, cookie: CONTRIBUTOR, body: { anchor: 'info', body: '   ' } },
   400,
 );
 await expect(
   'a bogus anchor is rejected',
-  { method: 'POST', path: '/api/comments', cookie: CONTRIBUTOR, body: { anchor: 'javascript:alert(1)', body: 'x' } },
+  {
+    method: 'POST',
+    path: `/api/specs/${SPEC}/comments`,
+    cookie: CONTRIBUTOR,
+    body: { anchor: 'javascript:alert(1)', body: 'x' },
+  },
   400,
 );
 
 console.log('\nopening an edit request needs a sign-in, nothing more');
-await expect('guest cannot open one', { method: 'POST', path: '/api/proposals', body: { title: 't', yaml: STUB_SPEC } }, 401);
+await expect(
+  'guest cannot open one',
+  { method: 'POST', path: `/api/specs/${SPEC}/proposals`, body: { title: 't', yaml: STUB_SPEC } },
+  401,
+);
 await expect(
   'contributor reaches validation, not a 403',
-  { method: 'POST', path: '/api/proposals', cookie: CONTRIBUTOR, body: { title: '  ', yaml: STUB_SPEC } },
+  { method: 'POST', path: `/api/specs/${SPEC}/proposals`, cookie: CONTRIBUTOR, body: { title: '  ', yaml: STUB_SPEC } },
   400,
 );
 await expect(
   'broken YAML never reaches storage',
-  { method: 'POST', path: '/api/proposals', cookie: CONTRIBUTOR, body: { title: 't', yaml: 'a: b: c: d:' } },
+  { method: 'POST', path: `/api/specs/${SPEC}/proposals`, cookie: CONTRIBUTOR, body: { title: 't', yaml: 'a: b: c: d:' } },
   422,
 );
 await expect(
   'a spec with no paths is rejected',
   {
     method: 'POST',
-    path: '/api/proposals',
+    path: `/api/specs/${SPEC}/proposals`,
     cookie: CONTRIBUTOR,
     body: { title: 't', yaml: 'openapi: 3.1.0\ninfo:\n  title: x\n  version: 1\n' },
   },
@@ -228,7 +258,7 @@ if (WRITE) {
     'contributor can actually post a comment',
     {
       method: 'POST',
-      path: '/api/comments',
+      path: `/api/specs/${SPEC}/comments`,
       cookie: CONTRIBUTOR,
       body: { anchor: 'info', anchorLabel: 'Overview', body: 'permission check — safe to ignore' },
     },
@@ -238,17 +268,27 @@ if (WRITE) {
     const { comment } = await created.json();
     await expect(
       'a contributor cannot resolve their own thread',
-      { method: 'PATCH', path: `/api/comments/${comment.id}`, cookie: CONTRIBUTOR, body: { resolved: true } },
+      {
+        method: 'PATCH',
+        path: `/api/specs/${SPEC}/comments/${comment.id}`,
+        cookie: CONTRIBUTOR,
+        body: { resolved: true },
+      },
       403,
     );
     await expect(
       'the owner can resolve it',
-      { method: 'PATCH', path: `/api/comments/${comment.id}`, cookie: OWNER_COOKIE, body: { resolved: true } },
+      {
+        method: 'PATCH',
+        path: `/api/specs/${SPEC}/comments/${comment.id}`,
+        cookie: OWNER_COOKIE,
+        body: { resolved: true },
+      },
       200,
     );
     await expect(
       'the author can delete their own comment',
-      { method: 'DELETE', path: `/api/comments/${comment.id}`, cookie: CONTRIBUTOR },
+      { method: 'DELETE', path: `/api/specs/${SPEC}/comments/${comment.id}`, cookie: CONTRIBUTOR },
       200,
     );
   }
@@ -257,7 +297,7 @@ if (WRITE) {
     'contributor can actually open an edit request',
     {
       method: 'POST',
-      path: '/api/proposals',
+      path: `/api/specs/${SPEC}/proposals`,
       cookie: CONTRIBUTOR,
       body: {
         title: 'permission check — safe to ignore',
@@ -271,14 +311,19 @@ if (WRITE) {
     const { proposal } = await opened.json();
     await expect(
       'a contributor cannot approve their own request',
-      { method: 'PATCH', path: `/api/proposals/${proposal.id}`, cookie: CONTRIBUTOR, body: { action: 'approve' } },
+      {
+        method: 'PATCH',
+        path: `/api/specs/${SPEC}/proposals/${proposal.id}`,
+        cookie: CONTRIBUTOR,
+        body: { action: 'approve' },
+      },
       403,
     );
     await expect(
       'the author can withdraw it',
       {
         method: 'PATCH',
-        path: `/api/proposals/${proposal.id}`,
+        path: `/api/specs/${SPEC}/proposals/${proposal.id}`,
         cookie: CONTRIBUTOR,
         body: { action: 'withdraw', note: 'permission check cleanup' },
       },
@@ -286,7 +331,12 @@ if (WRITE) {
     );
     await expect(
       'a withdrawn request cannot then be approved',
-      { method: 'PATCH', path: `/api/proposals/${proposal.id}`, cookie: OWNER_COOKIE, body: { action: 'approve' } },
+      {
+        method: 'PATCH',
+        path: `/api/specs/${SPEC}/proposals/${proposal.id}`,
+        cookie: OWNER_COOKIE,
+        body: { action: 'approve' },
+      },
       409,
     );
     console.log(`  note  edit request #${proposal.id} is left withdrawn — closed, and harmless.`);

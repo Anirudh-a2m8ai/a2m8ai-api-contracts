@@ -5,14 +5,23 @@
   "description": "API contracts between the college LMS backend and the services it calls.",
   "scripts": {
     "lint": "redocly lint",
-    "docs": "redocly build-docs ai-service/openapi.yaml -o docs/ai-service.html --disableGoogleFont && node build/inline-docs.mjs docs/ai-service.html",
-    "preview": "redocly preview-docs ai-service/openapi.yaml",
-    "bundle": "redocly bundle ai-service/openapi.yaml -o dist/ai-service.openapi.json",
-    "build": "npm run lint && npm run docs && npm run bundle",
+    "bundle:course-outline": "redocly bundle course-outline/openapi.yaml -o dist/course-outline.openapi.json && redocly bundle course-outline/openapi.yaml -o dist/course-outline.openapi.yaml",
+    "bundle:content-generation": "redocly bundle content-generation/openapi.yaml -o dist/content-generation.openapi.json && redocly bundle content-generation/openapi.yaml -o dist/content-generation.openapi.yaml",
+    "bundle": "npm run bundle:course-outline && npm run bundle:content-generation",
+    "docs:course-outline": "redocly build-docs course-outline/openapi.yaml -o docs/course-outline.html --disableGoogleFont && node build/inline-docs.mjs docs/course-outline.html",
+    "docs:content-generation": "redocly build-docs content-generation/openapi.yaml -o docs/content-generation.html --disableGoogleFont && node build/inline-docs.mjs docs/content-generation.html",
+    "docs": "npm run docs:course-outline && npm run docs:content-generation && node build/write-docs-index.mjs",
+    "preview": "redocly preview-docs course-outline/openapi.yaml",
+    "seed": "npm run bundle && node web/scripts/embed-spec.mjs",
+    "split:course-outline": "node build/split-spec.mjs dist/course-outline.openapi.yaml course-outline",
+    "split:content-generation": "node build/split-spec.mjs dist/content-generation.openapi.yaml content-generation",
+    "split": "npm run split:course-outline && npm run split:content-generation",
+    "build": "npm run lint && npm run bundle && node web/scripts/embed-spec.mjs && npm run docs",
     "pull": "node build/pull-spec.mjs",
-    "web": "npm --prefix web run dev"
+    "web": "npm run bundle && npm --prefix web run dev"
   },
   "devDependencies": {
-    "@redocly/cli": "^2.46.1"
+    "@redocly/cli": "^2.46.1",
+    "yaml": "^2.9.0"
   }
 }

@@ -1,7 +1,7 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { parseSpec, type Json } from '@/lib/openapi';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { deref, parseSpec, type Json } from '@/lib/openapi';
 import {
   INFO_ANCHOR,
   anchorLabel as labelForAnchor,
@@ -16,7 +16,9 @@ import { CommentThreadList } from './CommentThreadList';
 import { Markdown } from './Markdown';
 import { OperationCard } from './OperationCard';
 import { Pin } from './Pin';
+import { CodeBlock } from './SamplePanel';
 import { SchemaTree } from './SchemaTree';
+import { schemaSample } from '@/lib/sample';
 
 /**
  * The reference itself: navigation, the rendered contract, and the comment
@@ -24,6 +26,7 @@ import { SchemaTree } from './SchemaTree';
  * one opens that anchor's thread on the right.
  */
 export function SpecBrowser({
+  spec,
   yaml,
   initialComments,
   viewer,
@@ -31,6 +34,7 @@ export function SpecBrowser({
   versionLabel,
   initialAnchor,
 }: {
+  spec: string;
   yaml: string;
   initialComments: Comment[];
   viewer: Viewer;
@@ -46,7 +50,7 @@ export function SpecBrowser({
 }) {
   // Parsing 160 KiB of YAML is ~50 ms and the string never changes on a given
   // page load, so it happens once rather than on every keystroke in the filter.
-  const spec = useMemo(() => parseSpec(yaml), [yaml]);
+  const parsed = useMemo(() => parseSpec(yaml), [yaml]);
 
   const [comments, setComments] = useState(initialComments);
   const [active, setActive] = useState<{ anchor: string; label: string } | null>(() =>
@@ -55,11 +59,11 @@ export function SpecBrowser({
   const [query, setQuery] = useState('');
 
   const refresh = useCallback(async () => {
-    const response = await fetch('/api/comments', { cache: 'no-store' });
+    const response = await fetch(`/api/specs/${spec}/comments`, { cache: 'no-store' });
     if (!response.ok) return;
     const data = (await response.json()) as { comments: Comment[] };
     setComments(data.comments);
-  }, []);
+  }, [spec]);
 
   const select = useCallback((anchor: string, label: string) => {
     // Clicking the pin that is already open closes the rail, so it behaves
@@ -90,7 +94,9 @@ export function SpecBrowser({
     [counts, active, select],
   );
 
-  if (!spec) {
+  const here = useScrollSpy();
+
+  if (!parsed) {
     return (
       <main className="page">
         <div className="notice notice-error">
@@ -120,7 +126,18 @@ export function SpecBrowser({
             />
           </div>
 
-          {spec.tags.map((group) => {
+          {/*
+            The overview runs to a couple of screens, so without an entry of
+            its own the sidebar reads as having nothing selected for as long
+            as anyone spends reading it.
+          */}
+          <div className="sidebar-group">
+            <a className="sidebar-link" href="#overview" data-active={here === 'overview'}>
+              <span className="sidebar-link-text">Overview</span>
+            </a>
+          </div>
+
+          {parsed.tags.map((group) => {
             const visible = group.operations.filter(
               (entry) =>
                 matches(entry.path) ||
@@ -132,102 +149,124 @@ export function SpecBrowser({
 
             return (
               <div className="sidebar-group" key={group.name}>
-                <div className="sidebar-group-title">{group.name}</div>
-                {visible.map((entry) => (
-                  <a
-                    key={`${entry.method}-${entry.path}`}
-                    className="sidebar-link"
-                    href={`#${operationId(entry.method, entry.path)}`}
-                    title={`${entry.method.toUpperCase()} ${entry.path}`}
-                  >
-                    <span className={`method method-${entry.method}`}>{entry.method}</span>
-                    <span className="sidebar-link-text">
-                      {entry.operation.summary || entry.path}
-                    </span>
-                  </a>
-                ))}
+                <a className="sidebar-group-title" href={`#tag-${cssId(group.name)}`}>
+                  {group.name}
+                </a>
+                {visible.map((entry) => {
+                  const id = operationId(entry.method, entry.path);
+                  return (
+                    <a
+                      key={`${entry.method}-${entry.path}`}
+                      className="sidebar-link"
+                      href={`#${id}`}
+                      data-active={here === id}
+                      title={`${entry.method.toUpperCase()} ${entry.path}`}
+                    >
+                      <span className={`method method-${entry.method}`}>{entry.method}</span>
+                      <span className="sidebar-link-text">
+                        {entry.operation.summary || entry.path}
+                      </span>
+                    </a>
+                  );
+                })}
               </div>
             );
           })}
 
-          {spec.schemas.length ? (
+          {parsed.schemas.length ? (
             <div className="sidebar-group">
-              <div className="sidebar-group-title">Schemas</div>
-              {spec.schemas
+              <a className="sidebar-group-title" href="#schemas">
+                Schemas
+              </a>
+              {parsed.schemas
                 .filter(([name]) => matches(name))
-                .map(([name]) => (
-                  <a key={name} className="sidebar-link" href={`#schema-${cssId(name)}`}>
-                    <span className="sidebar-link-text mono">{name}</span>
-                  </a>
-                ))}
+                .map(([name]) => {
+                  const id = `schema-${cssId(name)}`;
+                  return (
+                    <a key={name} className="sidebar-link" href={`#${id}`} data-active={here === id}>
+                      <span className="sidebar-link-text mono">{name}</span>
+                    </a>
+                  );
+                })}
             </div>
           ) : null}
         </nav>
 
         <main className="main">
-          {!dbReady ? (
-            <div className="notice notice-warn">
-              <div>
-                <strong>Read-only.</strong> No database is attached to this deployment yet, so this
-                is the contract committed in the repo and comments cannot be saved. Attach one in
-                Vercel under Storage → Create Database → Postgres.
+          <div className="main-inner">
+            {!dbReady ? (
+              <div className="notice notice-warn">
+                <div>
+                  <strong>Read-only.</strong> No database is attached to this deployment yet, so
+                  this is the contract committed in the repo and comments cannot be saved. Attach
+                  one in Vercel under Storage → Create Database → Postgres.
+                </div>
               </div>
-            </div>
-          ) : null}
+            ) : null}
 
-          <SetupErrorNotice />
+            <SetupErrorNotice />
 
-          <header>
-            <div className="inline">
-              <h1 className="doc-title">{spec.info.title ?? 'API contract'}</h1>
-              <Pin anchor={INFO_ANCHOR} label="Overview" />
-            </div>
-            <p className="doc-sub">
-              <span className="pill mono">v{spec.info.version}</span>{' '}
-              {spec.info['x-status'] ? <span className="pill">{spec.info['x-status']}</span> : null}{' '}
-              {spec.info['x-consumer'] ? (
-                <span className="pill">consumer: {spec.info['x-consumer']}</span>
-              ) : null}{' '}
-              <span className="pill">{versionLabel}</span>
-            </p>
-            {spec.info.summary ? <p className="muted">{spec.info.summary}</p> : null}
-            <Markdown>{spec.info.description}</Markdown>
-          </header>
+            <header className="doc-head" id="overview">
+              <div className="doc-head-row">
+                <h1 className="doc-title">{parsed.info.title ?? 'API contract'}</h1>
+                <Pin anchor={INFO_ANCHOR} label="Overview" />
+              </div>
+              <div className="doc-meta">
+                <span className="pill mono">v{parsed.info.version}</span>
+                {parsed.info['x-status'] ? (
+                  <span className="pill">{parsed.info['x-status']}</span>
+                ) : null}
+                {parsed.info['x-consumer'] ? (
+                  <span className="pill">consumer: {parsed.info['x-consumer']}</span>
+                ) : null}
+                <span className="pill">{versionLabel}</span>
+              </div>
+              {parsed.info.summary ? <p className="doc-lede">{parsed.info.summary}</p> : null}
+            </header>
 
-          <Servers doc={spec.doc} />
-          <Dependencies doc={spec.doc} />
+            <Servers doc={parsed.doc} />
 
-          {spec.tags.map((group) => (
-            <section key={group.name}>
-              <h2 className="section-heading" id={`tag-${cssId(group.name)}`}>
-                {group.name}
-                <Pin anchor={tagAnchor(group.name)} label={group.name} />
-              </h2>
-              <Markdown>{group.description}</Markdown>
-              {group.operations.map((entry) => (
-                <OperationCard
-                  key={`${entry.method}-${entry.path}`}
-                  id={operationId(entry.method, entry.path)}
-                  doc={spec.doc}
-                  method={entry.method}
-                  path={entry.path}
-                  operation={entry.operation}
-                  defaultOpen={active?.anchor.startsWith(opAnchor(entry.method, entry.path)) ?? false}
-                />
-              ))}
-            </section>
-          ))}
+            <Markdown className="op-prose">{parsed.info.description}</Markdown>
 
-          {spec.schemas.length ? (
-            <section>
-              <h2 className="section-heading" id="schemas">
-                Schemas
-              </h2>
-              {spec.schemas.map(([name, schema]) => (
-                <SchemaCard key={name} doc={spec.doc} name={name} schema={schema} />
-              ))}
-            </section>
-          ) : null}
+            <Dependencies doc={parsed.doc} />
+
+            {parsed.tags.map((group) => (
+              <section key={group.name}>
+                <h2 className="section-heading" id={`tag-${cssId(group.name)}`}>
+                  {group.name}
+                  <Pin anchor={tagAnchor(group.name)} label={group.name} />
+                </h2>
+                <Markdown className="op-prose">{group.description}</Markdown>
+                {group.operations.map((entry) => (
+                  <OperationCard
+                    key={`${entry.method}-${entry.path}`}
+                    id={operationId(entry.method, entry.path)}
+                    doc={parsed.doc}
+                    method={entry.method}
+                    path={entry.path}
+                    operation={entry.operation}
+                  />
+                ))}
+              </section>
+            ))}
+
+            {parsed.schemas.length ? (
+              <section>
+                <h2 className="section-heading" id="schemas">
+                  Schemas
+                </h2>
+                <p className="doc-lede">
+                  The shapes the operations above are built from. Every one is reachable from at
+                  least one endpoint.
+                </p>
+                <div className="schema-list">
+                  {parsed.schemas.map(([name, schema]) => (
+                    <SchemaCard key={name} doc={parsed.doc} name={name} schema={schema} />
+                  ))}
+                </div>
+              </section>
+            ) : null}
+          </div>
         </main>
 
         {active ? (
@@ -253,6 +292,7 @@ export function SpecBrowser({
                 </div>
               ) : (
                 <CommentThreadList
+                  spec={spec}
                   comments={comments.filter((comment) => comment.anchor === active.anchor)}
                   viewer={viewer}
                   anchor={active.anchor}
@@ -267,6 +307,53 @@ export function SpecBrowser({
       </div>
     </CommentProvider>
   );
+}
+
+/**
+ * Which section the reader is currently in, for the sidebar highlight.
+ *
+ * A scroll listener rather than an IntersectionObserver: most of this page is
+ * collapsed schema cards, so at any moment dozens of targets intersect the
+ * viewport at once and picking between them costs as much as this does. The
+ * answer wanted is simply the last heading scrolled past.
+ */
+function useScrollSpy(): string | null {
+  const [id, setId] = useState<string | null>(null);
+  const frame = useRef(0);
+
+  useEffect(() => {
+    function measure() {
+      frame.current = 0;
+      const targets = document.querySelectorAll<HTMLElement>(
+        '.doc-head[id], .section-heading[id], .op[id]',
+      );
+      // A little below the sticky header, so a heading counts as "current"
+      // from the moment it settles under it rather than when it leaves.
+      const line = 140;
+      let found: string | null = null;
+      for (const target of targets) {
+        if (target.getBoundingClientRect().top <= line) found = target.id;
+        else break;
+      }
+      setId(found);
+    }
+
+    function onScroll() {
+      if (frame.current) return;
+      frame.current = requestAnimationFrame(measure);
+    }
+
+    measure();
+    window.addEventListener('scroll', onScroll, { passive: true });
+    window.addEventListener('resize', onScroll);
+    return () => {
+      if (frame.current) cancelAnimationFrame(frame.current);
+      window.removeEventListener('scroll', onScroll);
+      window.removeEventListener('resize', onScroll);
+    };
+  }, []);
+
+  return id;
 }
 
 /** Surfaces a failed sign-in instead of bouncing the reader back silently. */
@@ -303,16 +390,12 @@ function Servers({ doc }: { doc: Json }) {
   if (!servers.length) return null;
 
   return (
-    <div className="card" style={{ padding: '12px 16px', marginTop: 20 }}>
-      <div className="sub" style={{ marginTop: 0 }}>
-        servers
-      </div>
+    <div className="servers">
+      <span className="servers-label">Base URL</span>
       {servers.map((server: Json, index: number) => (
-        <div key={index} className="row">
-          <div className="row-main">
-            <div className="row-name">{server.url}</div>
-            {server.description ? <div className="row-desc">{server.description}</div> : null}
-          </div>
+        <div className="server" key={index}>
+          <code className="server-url">{server.url}</code>
+          {server.description ? <span className="server-desc">{server.description}</span> : null}
         </div>
       ))}
     </div>
@@ -330,58 +413,93 @@ function Dependencies({ doc }: { doc: Json }) {
   const blocking = dependencies.filter((entry: Json) => entry.blocking);
 
   return (
-    <details className="card" style={{ padding: '12px 16px', marginTop: 12 }}>
-      <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
-        Dependencies ({dependencies.length})
-        {blocking.length ? (
-          <span className="pill pill-warn" style={{ marginLeft: 8 }}>
-            {blocking.length} blocking
-          </span>
-        ) : null}
+    <details className="callout" open={blocking.length > 0}>
+      <summary className="callout-summary">
+        <span className="callout-caret" aria-hidden>
+          ▸
+        </span>
+        Dependencies
+        <span className="pill">{dependencies.length}</span>
+        {blocking.length ? <span className="pill pill-warn">{blocking.length} blocking</span> : null}
       </summary>
-      {dependencies.map((entry: Json, index: number) => (
-        <div key={index} className="row">
-          <div className="row-main">
-            <div className="inline" style={{ gap: 6 }}>
-              <span className="row-name">{entry.id ?? entry.title ?? `#${index + 1}`}</span>
+      <div className="callout-body">
+        {dependencies.map((entry: Json, index: number) => (
+          <div className="field-row" key={index}>
+            <div className="field-key">
+              <span className="field-name">{entry.id ?? entry.title ?? `#${index + 1}`}</span>
               {entry.blocking ? <span className="pill pill-warn">blocking</span> : null}
             </div>
-            <div className="row-desc">
-              <Markdown className="small">
-                {entry.description ?? entry.detail ?? JSON.stringify(entry)}
-              </Markdown>
-            </div>
+            <Markdown className="field-desc small">
+              {entry.description ?? entry.detail ?? JSON.stringify(entry)}
+            </Markdown>
           </div>
-        </div>
-      ))}
+        ))}
+      </div>
     </details>
   );
 }
 
+/**
+ * A schema on its own, collapsed.
+ *
+ * Unlike the operations there are seventy-odd of these, so the list has to
+ * stay scannable — the summary line carries the description, and opening one
+ * shows the field list beside a sample of the shape.
+ */
 function SchemaCard({ doc, name, schema }: { doc: Json; name: string; schema: Json }) {
   const [open, setOpen] = useState(false);
   const anchor = schemaAnchor(name);
+  const resolved = deref(doc, schema);
+  const sample = open ? schemaSample(doc, schema) : undefined;
 
   return (
-    <section className="card op" id={`schema-${cssId(name)}`} data-open={open}>
+    <section className="op op-schema" id={`schema-${cssId(name)}`} data-open={open}>
       <div className="op-head">
-        <button className="op-toggle" type="button" onClick={() => setOpen(!open)} aria-expanded={open}>
-          <span className="op-path">{name}</span>
-          <span className="op-summary">{schema?.description ?? ''}</span>
-          <span className="faint" aria-hidden>
+        <button
+          className="op-toggle"
+          type="button"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+        >
+          <span className="op-chevron" aria-hidden>
             {open ? '▾' : '▸'}
           </span>
+          <span className="op-path">{name}</span>
+          {resolved?.description ? (
+            <span className="op-summary">{firstLine(resolved.description)}</span>
+          ) : null}
         </button>
         <Pin anchor={anchor} label={name} />
       </div>
       {open ? (
         <div className="op-body">
-          <Markdown className="small">{schema?.description}</Markdown>
-          <SchemaTree doc={doc} schema={schema} anchorBase={anchor} />
+          <div className="op-docs">
+            <Markdown className="op-prose">{resolved?.description}</Markdown>
+            <SchemaTree doc={doc} schema={schema} anchorBase={anchor} />
+          </div>
+          <div className="op-samples">
+            <div className="op-samples-inner">
+              {sample === undefined ? null : (
+                <div className="samples">
+                  <section className="sample-group">
+                    <div className="sample-group-head">
+                      <h4 className="sample-group-title">Shape</h4>
+                    </div>
+                    <CodeBlock value={sample} />
+                  </section>
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       ) : null}
     </section>
   );
+}
+
+/** The lead sentence of a description, for a one-line summary slot. */
+function firstLine(description: string): string {
+  return description.split('\n')[0];
 }
 
 /** A DOM id for an operation. Paths contain slashes and braces; ids cannot. */

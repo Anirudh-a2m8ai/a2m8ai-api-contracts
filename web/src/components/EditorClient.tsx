@@ -17,12 +17,14 @@ import { SpecPreview } from './SpecPreview';
  * needs to be honest about which of the two is going to happen.
  */
 export function EditorClient({
+  spec,
   initialYaml,
   viewer,
   dbReady,
   baseVersionLabel,
   ownerLogin,
 }: {
+  spec: string;
   initialYaml: string;
   viewer: Viewer;
   dbReady: boolean;
@@ -88,7 +90,7 @@ export function EditorClient({
     setBusy(true);
     setResult(null);
     try {
-      const response = await fetch('/api/spec', {
+      const response = await fetch(`/api/specs/${spec}`, {
         method: 'PUT',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ yaml, message }),
@@ -115,7 +117,7 @@ export function EditorClient({
     } finally {
       setBusy(false);
     }
-  }, [yaml, message, router]);
+  }, [spec, yaml, message, router]);
 
   const propose = useCallback(async () => {
     if (!title.trim()) {
@@ -125,7 +127,7 @@ export function EditorClient({
     setBusy(true);
     setResult(null);
     try {
-      const response = await fetch('/api/proposals', {
+      const response = await fetch(`/api/specs/${spec}/proposals`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ title, body, yaml }),
@@ -140,13 +142,13 @@ export function EditorClient({
         return;
       }
       // Navigating away is safe now: the work is on the server.
-      router.push(`/proposals/${data.proposal.id}`);
+      router.push(`/${spec}/proposals/${data.proposal.id}`);
     } catch {
       setResult({ kind: 'error', text: 'Network error — the edit request was not opened.' });
     } finally {
       setBusy(false);
     }
-  }, [title, body, yaml, router]);
+  }, [spec, title, body, yaml, router]);
 
   const blocked = !validation.ok || !dirty || busy || !dbReady;
 
@@ -184,7 +186,10 @@ export function EditorClient({
         </button>
 
         {viewer.role === 'guest' ? (
-          <a className="btn btn-primary btn-sm" href="/api/auth/login?returnTo=%2Feditor">
+          <a
+            className="btn btn-primary btn-sm"
+            href={`/api/auth/login?returnTo=${encodeURIComponent(`/${spec}/editor`)}`}
+          >
             Sign in to propose changes
           </a>
         ) : isOwner ? (

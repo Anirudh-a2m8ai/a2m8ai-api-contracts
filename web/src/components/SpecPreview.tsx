@@ -23,16 +23,16 @@ export function SpecPreview({ yaml }: { yaml: string }) {
   return (
     <CommentProvider value={INERT_COMMENTS}>
       <h1 className="doc-title">{spec.info.title ?? 'API contract'}</h1>
-      <p className="doc-sub">
-        <span className="pill mono">v{spec.info.version}</span>{' '}
+      <div className="doc-meta">
+        <span className="pill mono">v{spec.info.version}</span>
         {spec.info['x-status'] ? <span className="pill">{spec.info['x-status']}</span> : null}
-      </p>
-      <Markdown>{spec.info.description}</Markdown>
+      </div>
+      <Markdown className="op-prose">{spec.info.description}</Markdown>
 
       {spec.tags.map((group) => (
         <section key={group.name}>
           <h2 className="section-heading">{group.name}</h2>
-          <Markdown>{group.description}</Markdown>
+          <Markdown className="op-prose">{group.description}</Markdown>
           {group.operations.map((entry) => (
             <OperationCard
               key={`${entry.method}-${entry.path}`}
