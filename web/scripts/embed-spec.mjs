@@ -43,7 +43,7 @@ const slugs = Object.keys(redoclyConfig.apis ?? {});
 // back to what's already there instead of dropping that spec entirely.
 let existing = {};
 if (existsSync(outFile)) {
-  const match = readFileSync(outFile, 'utf8').match(/SEED_SPECS[^{]*=\s*(\{[\s\S]*?\n\});/);
+  const match = readFileSync(outFile, 'utf8').match(/SEED_SPECS[^=]*=\s*(\{[\s\S]*?\n\});/);
   if (match) {
     try {
       // The generated object literal is JSON-safe (string/number values only).
@@ -73,8 +73,13 @@ for (const slug of slugs) {
   console.log(`embed-spec: dist/${slug}.openapi.yaml -> seed-spec.ts (${Math.round(Buffer.byteLength(yaml) / 1024)} KiB)`);
 }
 
+// Keys are quoted so this object literal is also valid JSON — the "existing
+// entries" fallback above parses it with JSON.parse rather than a JS eval.
 const body = Object.entries(entries)
-  .map(([slug, { yaml, bytes }]) => `  ${JSON.stringify(slug)}: { yaml: ${JSON.stringify(yaml)}, bytes: ${bytes} },`)
+  .map(
+    ([slug, { yaml, bytes }]) =>
+      `  ${JSON.stringify(slug)}: { "yaml": ${JSON.stringify(yaml)}, "bytes": ${bytes} },`,
+  )
   .join('\n');
 
 mkdirSync(dirname(outFile), { recursive: true });
